@@ -1,0 +1,36 @@
+# Feature engineering settings
+features:
+  # Lag features (past days to use)
+  price_lags: [1, 2, 3, 5, 7, 14, 21, 30]
+  volume_lags: [1, 5, 21]
+
+  # Moving averages
+  ma_windows: [7, 21, 50]
+
+  # RSI
+  rsi_period: 14
+
+  # MACD
+  macd_fast: 12
+  macd_slow: 26
+  macd_signal: 9
+
+  # Bollinger Bands
+  bb_window: 20
+  bb_std: 2
+
+  # Rolling volatility
+  volatility_windows: [7, 21]
+
+  # Calendar features
+  include_calendar: true
+
+# Target variable
+target:
+  horizon: 7                # Predict 7 days ahead
+  type: "return"            # "return" or "direction"
+
+# Train/test split
+split:
+  test_days: 60             # Last 60 days for testing
+  gap: 0                    # No gap (continuous)

@@ -54,7 +54,10 @@ artifacts/models/*.pt
 artifacts/reports/*.json
 artifacts/reports/*.md
 !artifacts/reports/.gitkeep
-
+artifacts/preprocessing/*.csv
+artifacts/preprocessing/*.txt
+artifacts/preprocessing/*.json
+artifacts/preprocessing/*.parquet
 # Logs
 *.log
 logs/

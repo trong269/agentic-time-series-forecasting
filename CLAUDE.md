@@ -17,8 +17,8 @@ An end-to-end automated pipeline for time series forecasting focused on **NVDA s
 ### Directory Structure
 
 - `src/ingestion/` — Fetches daily stock data via **yfinance**. Writes to `data/`.
-- `src/preprocessing/` — Cleans ingested data (missing values, duplicates), derives lag features.
-- `src/forecasting/` — Generates 7-day point forecasts with 80%/95% confidence intervals. Supports ARIMA, Prophet, XGBoost, LSTM.
+- `src/preprocessing/` — Feature engineering for XGBoost: lag features, technical indicators, calendar features.
+- `src/forecasting/` — XGBoost model for 7-day price predictions.
 - `src/agents/` — AI agent that evaluates prediction quality, diagnoses model issues, and recommends adjustments.
 - `src/evaluation/` — Computes holdout metrics (MAE, RMSE, MAPE).
 - `src/reporting/` — Produces structured JSON reports and human-readable Markdown.
@@ -34,6 +34,15 @@ An end-to-end automated pipeline for time series forecasting focused on **NVDA s
 ## Common Commands
 
 ```bash
+# Fetch stock data
+python -c "from src.ingestion import fetch_stock_data; fetch_stock_data('NVDA')"
+
+# Get stock data
+python -c "from src.ingestion import get_stock_data; df = get_stock_data('NVDA')"
+
+# Preprocess for training
+python -c "from src.preprocessing import preprocess_for_training; result = preprocess_for_training('NVDA')"
+
 # Run the full daily pipeline (ingest → forecast → evaluate → report)
 python scripts/run_daily_pipeline.py
 
@@ -57,11 +66,13 @@ All settings managed via YAML configs in `configs/`. Environment variables (API 
 |------|---------|
 | `configs/app.yaml` | General app settings |
 | `configs/ingestion.yaml` | Data ingestion settings (ticker, lookback, retry) |
+| `configs/preprocessing.yaml` | Feature engineering settings (lags, technical indicators) |
 | `configs/model.yaml` | Model parameters |
 | `configs/agent.yaml` | Agent settings |
 
-### Key Configuration Keys (`configs/ingestion.yaml`)
+### Key Configuration Keys
 
+**`configs/ingestion.yaml`**
 ```yaml
 ticker: "NVDA"           # Default ticker (can override in code)
 lookback_days: 730       # Days of historical data to fetch
@@ -72,28 +83,38 @@ db:
   table_name: "stock_daily"
 ```
 
-## Common Commands
+**`configs/preprocessing.yaml`**
+```yaml
+features:
+  price_lags: [1, 2, 3, 5, 7, 14, 21, 30]
+  volume_lags: [1, 5, 21]
+  ma_windows: [7, 21, 50]
+  rsi_period: 14
+  macd_fast: 12, macd_slow: 26, macd_signal: 9
+  bb_window: 20, bb_std: 2
+  volatility_windows: [7, 21]
+  include_calendar: true
 
-```bash
-# Fetch stock data
-python -c "from src.ingestion import fetch_stock_data; fetch_stock_data('NVDA')"
+target:
+  horizon: 7                # Predict 7 days ahead
+  type: "return"             # "return" or "direction"
 
-# Get stock data
-python -c "from src.ingestion import get_stock_data; df = get_stock_data('NVDA')"
+split:
+  test_days: 60             # Last 60 days for testing
+  gap: 0
 ```
 
 ---
 
 ## Session Progress (May 2026)
 
-### Completed
+### Phase 1: Live Data Ingestion ✅ COMPLETED
 
 - [x] **ConfigManager** (`src/utils/config_manager.py`)
   - Central singleton that loads all YAML configs from `configs/`
-  - Properties: `config_manager.ingestion`, `config_manager.app`, `config_manager.agent`, `config_manager.model`
-  - `config_manager.get(config_name, key, default)` for dot-notation access
+  - Properties: `config_manager.ingestion`, `config_manager.app`, `config_manager.preprocessing`, `config_manager.agent`, `config_manager.model`
 
-- [x] **Live Data Ingestion Module** (`src/ingestion/`)
+- [x] **Ingestion Module** (`src/ingestion/`)
   - `fetch_stock_data(ticker)` — Fetch and store stock data via yfinance
   - `get_stock_data(ticker, start_date, end_date)` — Retrieve data for downstream
   - Incremental fetch: only fetches new data since last stored date
@@ -106,29 +127,68 @@ python -c "from src.ingestion import get_stock_data; df = get_stock_data('NVDA')
   - `get_data(db_path, ticker, start_date, end_date, table_name)` — Query
   - `get_latest_date(db_path, ticker, table_name)` — For incremental fetch
 
-- [x] **Dependencies** (`requirements.txt`)
-  - yfinance, pandas, python-dotenv, pyyaml
+### Phase 2: Preprocessing ✅ COMPLETED
 
-### In Progress
+- [x] **Preprocessing Pipeline** (`src/preprocessing/pipeline.py`)
+  - `PreprocessingPipeline` class with `fit_transform()` and `transform()`
+  - `preprocess_for_training(ticker)` — Convenience function
+  - Time-based train/test split (last 60 days for test)
+  - Auto-excludes columns with all NaN values (e.g., `adj_close`)
 
-- Preprocessing module (`src/preprocessing/`)
-- Forecasting module (`src/forecasting/`)
-- LangGraph workflow orchestration
+- [x] **Feature Engineering** (`src/preprocessing/feature_engineering.py`)
+  - Price lag features: close_lag_1, _2, _3, _5, _7, _14, _21, _30
+  - Return features: return_1d, return_5d, return_7d, return_21d
+  - Moving averages: MA_7, MA_21, MA_50, close_to_MA ratios
+  - Volume features: volume_lag, volume_MA, volume_ratio
+
+- [x] **Technical Indicators** (`src/preprocessing/technical.py`)
+  - `calculate_rsi()` — Relative Strength Index
+  - `calculate_macd()` — MACD line, signal, histogram
+  - `calculate_bollinger_bands()` — Upper, middle, lower bands
+  - `calculate_atr()` — Average True Range
+  - `calculate_volatility()` — Rolling standard deviation
+
+- [x] **Calendar Features** (`src/preprocessing/calendar.py`)
+  - day_of_week, day_of_month, month, quarter
+  - is_month_start, is_month_end, is_quarter_start, is_year_start
+
+- [x] **Data Validation** (`src/preprocessing/validator.py`)
+  - `validate_data()` — Check required columns, date monotonicity
+  - `handle_missing_values()` — Forward fill for stock data
+  - `get_data_summary()` — Statistics overview
+
+**Features Generated (49 features):**
+- OHLCV: open, high, low, close, volume
+- Price lags: 8 features
+- Returns: 4 features
+- Moving averages & ratios: 6 features
+- Technical: RSI, MACD (3), Bollinger position, ATR, volatility (2)
+- Volume: 5 features
+- Calendar: 8 features
+
+### Phase 3: Forecasting 🚧 IN PROGRESS
+
+**Next: XGBoost Model Implementation**
+
+- [ ] `src/forecasting/trainer.py` — XGBoost training
+- [ ] `src/forecasting/predictor.py` — 7-day prediction
+- [ ] `configs/model.yaml` — XGBoost hyperparameters
 
 ### Pending
 
-- Agent evaluation logic (`src/agents/`)
-- Reporting module (`src/reporting/`)
-- Scripts implementation (`run_daily_pipeline.py`, `train_model.py`)
-- Test coverage
+- [ ] Agent evaluation logic (`src/agents/`)
+- [ ] Reporting module (`src/reporting/`)
+- [ ] Scripts implementation (`run_daily_pipeline.py`, `train_model.py`)
+- [ ] Evaluation metrics (`src/evaluation/`)
+- [ ] Test coverage
 
 ---
 
 ## Data Flow
 
 1. **Ingestion** pulls stock data via yfinance and stores in SQLite (`data/stocks.db`)
-2. **Preprocessing** handles missing values, outliers, feature engineering
-3. **Forecasting** outputs predictions with confidence intervals to `artifacts/reports/`
+2. **Preprocessing** creates 49 features: lags, returns, technical indicators, calendar
+3. **Forecasting** outputs 7-day predictions with confidence intervals
 4. **Agent Evaluator** reads predictions, diagnoses issues, outputs structured feedback
 5. **Improvement Agent** receives feedback and adjusts model parameters or triggers retraining
 

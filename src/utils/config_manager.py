@@ -75,6 +75,11 @@ class ConfigManager:
         """Get model config."""
         return self._configs.get("model", {})
 
+    @property
+    def preprocessing(self) -> dict:
+        """Get preprocessing config."""
+        return self._configs.get("preprocessing", {})
+
 
 # Global singleton instance
 config_manager = ConfigManager()
