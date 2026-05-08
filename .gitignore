@@ -1,0 +1,74 @@
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Data & Artifacts
+data/
+artifacts/models/*.pkl
+artifacts/models/*.joblib
+artifacts/models/*.h5
+artifacts/models/*.pt
+artifacts/reports/*.json
+artifacts/reports/*.md
+!artifacts/reports/.gitkeep
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets / Keys
+*.pem
+*.key
+credentials.json
+secrets.json
+
+# AI Generated
+# CLAUDE.md
+.claude/
