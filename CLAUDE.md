@@ -16,7 +16,7 @@ An end-to-end automated pipeline for time series forecasting focused on **NVDA s
 
 ### Directory Structure
 
-- `src/ingestion/` — Fetches daily NVDA stock data via **yfinance**. Writes to `data/`.
+- `src/ingestion/` — Fetches daily stock data via **yfinance**. Writes to `data/`.
 - `src/preprocessing/` — Cleans ingested data (missing values, duplicates), derives lag features.
 - `src/forecasting/` — Generates 7-day point forecasts with 80%/95% confidence intervals. Supports ARIMA, Prophet, XGBoost, LSTM.
 - `src/agents/` — AI agent that evaluates prediction quality, diagnoses model issues, and recommends adjustments.
@@ -29,7 +29,7 @@ An end-to-end automated pipeline for time series forecasting focused on **NVDA s
 - `configs/` — YAML configuration for data sources, model params, and agent settings.
 - `artifacts/models/` — Serialized forecast models.
 - `artifacts/reports/` — Generated daily reports.
-- `data/` — Raw ingested NVDA time series data stored in **SQLite** (`data/stocks.db`).
+- `data/` — Raw ingested stock time series data stored in **SQLite** (`data/stocks.db`).
 
 ## Common Commands
 
@@ -49,11 +49,84 @@ pip install -r requirements.txt
 
 ## Configuration
 
-All settings managed via `configs/app.yaml`. Environment variables (API keys, DB paths) stored in `.env` (not committed).
+All settings managed via YAML configs in `configs/`. Environment variables (API keys, DB paths) stored in `.env` (not committed).
+
+### Config Files
+
+| File | Purpose |
+|------|---------|
+| `configs/app.yaml` | General app settings |
+| `configs/ingestion.yaml` | Data ingestion settings (ticker, lookback, retry) |
+| `configs/model.yaml` | Model parameters |
+| `configs/agent.yaml` | Agent settings |
+
+### Key Configuration Keys (`configs/ingestion.yaml`)
+
+```yaml
+ticker: "NVDA"           # Default ticker (can override in code)
+lookback_days: 730       # Days of historical data to fetch
+retry_attempts: 3
+retry_delay: 1.0
+db:
+  path: "data/stocks.db"
+  table_name: "stock_daily"
+```
+
+## Common Commands
+
+```bash
+# Fetch stock data
+python -c "from src.ingestion import fetch_stock_data; fetch_stock_data('NVDA')"
+
+# Get stock data
+python -c "from src.ingestion import get_stock_data; df = get_stock_data('NVDA')"
+```
+
+---
+
+## Session Progress (May 2026)
+
+### Completed
+
+- [x] **ConfigManager** (`src/utils/config_manager.py`)
+  - Central singleton that loads all YAML configs from `configs/`
+  - Properties: `config_manager.ingestion`, `config_manager.app`, `config_manager.agent`, `config_manager.model`
+  - `config_manager.get(config_name, key, default)` for dot-notation access
+
+- [x] **Live Data Ingestion Module** (`src/ingestion/`)
+  - `fetch_stock_data(ticker)` — Fetch and store stock data via yfinance
+  - `get_stock_data(ticker, start_date, end_date)` — Retrieve data for downstream
+  - Incremental fetch: only fetches new data since last stored date
+  - Exponential backoff retry for API resilience
+  - Dynamic ticker support: any stock ticker works via parameter or config
+
+- [x] **SQLite Storage** (`src/ingestion/storage.py`)
+  - `init_db(db_path, table_name)` — Create table with dynamic name
+  - `upsert_data(db_path, df, ticker, table_name)` — Insert or replace
+  - `get_data(db_path, ticker, start_date, end_date, table_name)` — Query
+  - `get_latest_date(db_path, ticker, table_name)` — For incremental fetch
+
+- [x] **Dependencies** (`requirements.txt`)
+  - yfinance, pandas, python-dotenv, pyyaml
+
+### In Progress
+
+- Preprocessing module (`src/preprocessing/`)
+- Forecasting module (`src/forecasting/`)
+- LangGraph workflow orchestration
+
+### Pending
+
+- Agent evaluation logic (`src/agents/`)
+- Reporting module (`src/reporting/`)
+- Scripts implementation (`run_daily_pipeline.py`, `train_model.py`)
+- Test coverage
+
+---
 
 ## Data Flow
 
-1. **Ingestion** pulls latest NVDA data via yfinance and stores in SQLite (`data/stocks.db`)
+1. **Ingestion** pulls stock data via yfinance and stores in SQLite (`data/stocks.db`)
 2. **Preprocessing** handles missing values, outliers, feature engineering
 3. **Forecasting** outputs predictions with confidence intervals to `artifacts/reports/`
 4. **Agent Evaluator** reads predictions, diagnoses issues, outputs structured feedback

@@ -1,0 +1,8 @@
+ticker: "NVDA"
+lookback_days: 730   # ~2 years for initial load
+retry_attempts: 3
+retry_delay: 1.0     # exponential backoff base (seconds)
+
+db:
+  path: "data/stocks.db"
+  table_name: "stock_daily"
