@@ -47,17 +47,7 @@ htmlcov/
 
 # Data & Artifacts
 data/
-artifacts/models/*.pkl
-artifacts/models/*.joblib
-artifacts/models/*.h5
-artifacts/models/*.pt
-artifacts/reports/*.json
-artifacts/reports/*.md
-!artifacts/reports/.gitkeep
-artifacts/preprocessing/*.csv
-artifacts/preprocessing/*.txt
-artifacts/preprocessing/*.json
-artifacts/preprocessing/*.parquet
+artifacts/
 # Logs
 *.log
 logs/

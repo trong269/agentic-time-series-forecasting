@@ -3,11 +3,18 @@
 import pandas as pd
 
 
-def create_calendar_features(df: pd.DataFrame) -> pd.DataFrame:
+def create_calendar_features(
+    df: pd.DataFrame,
+    features: list[str] | None = None
+) -> pd.DataFrame:
     """Create calendar-based features from date column.
 
     Args:
         df: Input DataFrame with 'date' column.
+        features: List of features to include. Options: quarter, month, week_of_year,
+                  day_of_week, day_of_month, is_month_start, is_month_end,
+                  is_quarter_start, is_year_start.
+                  Default: [quarter, month, week_of_year]
 
     Returns:
         DataFrame with added calendar features.
@@ -20,29 +27,23 @@ def create_calendar_features(df: pd.DataFrame) -> pd.DataFrame:
         date_series = pd.to_datetime(date_series)
         result["date"] = date_series
 
-    # Day of week (0=Monday, 4=Friday for stock market)
-    result["day_of_week"] = result["date"].dt.dayofweek
+    default_features = ["quarter", "month", "week_of_year"]
+    features = features or default_features
 
-    # Day of month
-    result["day_of_month"] = result["date"].dt.day
+    available_features = {
+        "day_of_week": result["date"].dt.dayofweek,
+        "day_of_month": result["date"].dt.day,
+        "month": result["date"].dt.month,
+        "quarter": result["date"].dt.quarter,
+        "is_month_start": result["date"].dt.is_month_start.astype(int),
+        "is_month_end": result["date"].dt.is_month_end.astype(int),
+        "is_quarter_start": result["date"].dt.is_quarter_start.astype(int),
+        "is_year_start": result["date"].dt.is_year_start.astype(int),
+        "week_of_year": result["date"].dt.isocalendar().week,
+    }
 
-    # Month
-    result["month"] = result["date"].dt.month
-
-    # Quarter
-    result["quarter"] = result["date"].dt.quarter
-
-    # Is month start/end
-    result["is_month_start"] = result["date"].dt.is_month_start.astype(int)
-    result["is_month_end"] = result["date"].dt.is_month_end.astype(int)
-
-    # Is quarter start
-    result["is_quarter_start"] = result["date"].dt.is_quarter_start.astype(int)
-
-    # Is year start
-    result["is_year_start"] = result["date"].dt.is_year_start.astype(int)
-
-    # Week of year
-    result["week_of_year"] = result["date"].dt.isocalendar().week
+    for feat in features:
+        if feat in available_features:
+            result[feat] = available_features[feat]
 
     return result

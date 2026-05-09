@@ -86,18 +86,42 @@ db:
 **`configs/preprocessing.yaml`**
 ```yaml
 features:
-  price_lags: [1, 2, 3, 5, 7, 14, 21, 30]
-  volume_lags: [1, 5, 21]
+  # Price lag features (selected important ones)
+  price_lags: [1, 7, 30]
+
+  # Moving averages
   ma_windows: [7, 21, 50]
-  rsi_period: 14
-  macd_fast: 12, macd_slow: 26, macd_signal: 9
-  bb_window: 20, bb_std: 2
-  volatility_windows: [7, 21]
+
+  # MACD (signal line only, histogram dropped)
+  macd_fast: 12
+  macd_slow: 26
+  macd_signal: 9
+
+  # Bollinger Bands (position only, bands dropped)
+  bb_window: 20
+  bb_std: 2
+
+  # Volatility (21d only)
+  volatility_windows: [21]
+
+  # Calendar features (only important ones)
   include_calendar: true
+  calendar_features: [quarter, month, week_of_year]
+
+  # Volume features (MA only, no lags)
+  volume_ma_windows: [7, 21]
+
+  # Returns (21d only)
+  return_periods: [21]
+
+  # Other
+  include_atr: true
+  include_close_to_ma: true
+  close_to_ma_windows: [50]
 
 target:
   horizon: 7                # Predict 7 days ahead
-  type: "return"             # "return" or "direction"
+  type: "close"             # Predict actual close price (not return)
 
 split:
   test_days: 60             # Last 60 days for testing
@@ -136,35 +160,42 @@ split:
   - Auto-excludes columns with all NaN values (e.g., `adj_close`)
 
 - [x] **Feature Engineering** (`src/preprocessing/feature_engineering.py`)
-  - Price lag features: close_lag_1, _2, _3, _5, _7, _14, _21, _30
-  - Return features: return_1d, return_5d, return_7d, return_21d
-  - Moving averages: MA_7, MA_21, MA_50, close_to_MA ratios
-  - Volume features: volume_lag, volume_MA, volume_ratio
+  - Price lag features: close_lag_1, close_lag_7, close_lag_30
+  - Return features: return_21d (only)
+  - Moving averages: MA_7, MA_21, MA_50
+  - Close-to-MA ratio: close_to_MA_50
+  - Volume features: volume_MA_7, volume_MA_21 (no raw volume or lags)
+  - Technical: MACD_signal, BB_position, ATR, volatility_21d
+  - Calendar: quarter, month, week_of_year
 
 - [x] **Technical Indicators** (`src/preprocessing/technical.py`)
-  - `calculate_rsi()` — Relative Strength Index
-  - `calculate_macd()` — MACD line, signal, histogram
-  - `calculate_bollinger_bands()` — Upper, middle, lower bands
+  - `calculate_rsi()` — Relative Strength Index (not used in final model)
+  - `calculate_macd()` — MACD line, signal, histogram (only signal used)
+  - `calculate_bollinger_bands()` — Upper, middle, lower bands (only position used)
   - `calculate_atr()` — Average True Range
   - `calculate_volatility()` — Rolling standard deviation
 
 - [x] **Calendar Features** (`src/preprocessing/calendar.py`)
-  - day_of_week, day_of_month, month, quarter
-  - is_month_start, is_month_end, is_quarter_start, is_year_start
+  - quarter, month, week_of_year (filtered for importance)
 
 - [x] **Data Validation** (`src/preprocessing/validator.py`)
   - `validate_data()` — Check required columns, date monotonicity
   - `handle_missing_values()` — Forward fill for stock data
   - `get_data_summary()` — Statistics overview
 
-**Features Generated (49 features):**
-- OHLCV: open, high, low, close, volume
-- Price lags: 8 features
-- Returns: 4 features
-- Moving averages & ratios: 6 features
-- Technical: RSI, MACD (3), Bollinger position, ATR, volatility (2)
-- Volume: 5 features
-- Calendar: 8 features
+- [x] **Feature Selection** (May 2026)
+  - Analyzed correlations and feature importance
+  - Reduced from 49 → 17 features based on correlation with target
+  - Dropped: open, high, low, close, volume (raw current-day values not known at prediction time)
+  - Dropped: RSI, volume_lags, return_1d/5d/7d, is_* flags, day_of_week, day_of_month
+
+**Features Generated (17 features) - all predictive (lag-based or derived):**
+- Price lags: close_lag_1, close_lag_7, close_lag_30 (3)
+- Returns: return_21d (1)
+- Moving averages: MA_7, MA_21, MA_50, close_to_MA_50 (4)
+- Volume: volume_MA_7, volume_MA_21 (2)
+- Technical: MACD_signal, BB_position, ATR, volatility_21d (4)
+- Calendar: quarter, month, week_of_year (3)
 
 ### Phase 3: Forecasting 🚧 IN PROGRESS
 
@@ -187,8 +218,8 @@ split:
 ## Data Flow
 
 1. **Ingestion** pulls stock data via yfinance and stores in SQLite (`data/stocks.db`)
-2. **Preprocessing** creates 49 features: lags, returns, technical indicators, calendar
-3. **Forecasting** outputs 7-day predictions with confidence intervals
+2. **Preprocessing** creates 17 features: price lags, returns, MAs, technical indicators, calendar
+3. **Forecasting** outputs 7-day price predictions (close, not return)
 4. **Agent Evaluator** reads predictions, diagnoses issues, outputs structured feedback
 5. **Improvement Agent** receives feedback and adjusts model parameters or triggers retraining
 

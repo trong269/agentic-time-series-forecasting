@@ -31,18 +31,25 @@ class PreprocessingPipeline:
         """Get feature engineering configuration."""
         features = self.config.get("features", {})
         return {
-            "price_lags": features.get("price_lags", [1, 2, 3, 5, 7, 14, 21, 30]),
-            "volume_lags": features.get("volume_lags", [1, 5]),
+            "price_lags": features.get("price_lags", [1, 7, 30]),
+            "volume_ma_windows": features.get("volume_ma_windows", [7, 21]),
             "ma_windows": features.get("ma_windows", [7, 21, 50]),
-            "return_periods": features.get("return_periods", [1, 5, 7, 21]),
-            "volatility_windows": features.get("volatility_windows", [7, 21]),
-            "rsi_period": features.get("rsi_period", 14),
+            "return_periods": features.get("return_periods", [21]),
+            "volatility_windows": features.get("volatility_windows", [21]),
+            "rsi_period": features.get("rsi_period"),
             "macd_fast": features.get("macd_fast", 12),
             "macd_slow": features.get("macd_slow", 26),
             "macd_signal": features.get("macd_signal", 9),
+            "macd_include_histogram": features.get("macd_include_histogram", False),
             "bb_window": features.get("bb_window", 20),
             "bb_std": features.get("bb_std", 2.0),
+            "bb_include_bands": features.get("bb_include_bands", False),
             "include_calendar": features.get("include_calendar", True),
+            "calendar_features": features.get("calendar_features", ["quarter", "month", "week_of_year"]),
+            "include_atr": features.get("include_atr", True),
+            "include_close_to_ma": features.get("include_close_to_ma", True),
+            "close_to_ma_windows": features.get("close_to_ma_windows", [50]),
+            "include_high_low_ratio": features.get("include_high_low_ratio", False),
         }
 
     def _get_target_config(self) -> dict[str, Any]:
@@ -89,15 +96,15 @@ class PreprocessingPipeline:
 
         # Determine max lag and horizon for trimming
         max_price_lag = max(feature_config["price_lags"])
-        max_volume_lag = max(feature_config["volume_lags"])
-        max_lag = max(max_price_lag, max_volume_lag)
+        # Volume has no lags now, only MA windows
+        max_lag = max_price_lag
         target_horizon = target_config["horizon"]
 
         # Create all features
         df_features = create_all_features(
             df,
             price_lags=feature_config["price_lags"],
-            volume_lags=feature_config["volume_lags"],
+            volume_ma_windows=feature_config["volume_ma_windows"],
             ma_windows=feature_config["ma_windows"],
             return_periods=feature_config["return_periods"],
             volatility_windows=feature_config["volatility_windows"],
@@ -105,9 +112,16 @@ class PreprocessingPipeline:
             macd_fast=feature_config["macd_fast"],
             macd_slow=feature_config["macd_slow"],
             macd_signal=feature_config["macd_signal"],
+            macd_include_histogram=feature_config["macd_include_histogram"],
             bb_window=feature_config["bb_window"],
             bb_std=feature_config["bb_std"],
+            bb_include_bands=feature_config["bb_include_bands"],
             include_calendar=feature_config["include_calendar"],
+            calendar_features=feature_config["calendar_features"],
+            include_atr=feature_config["include_atr"],
+            include_close_to_ma=feature_config["include_close_to_ma"],
+            close_to_ma_windows=feature_config["close_to_ma_windows"],
+            include_high_low_ratio=feature_config["include_high_low_ratio"],
             target_horizon=target_horizon,
             target_type=target_config["type"],
         )
@@ -177,7 +191,7 @@ class PreprocessingPipeline:
         df_features = create_all_features(
             df,
             price_lags=feature_config["price_lags"],
-            volume_lags=feature_config["volume_lags"],
+            volume_ma_windows=feature_config["volume_ma_windows"],
             ma_windows=feature_config["ma_windows"],
             return_periods=feature_config["return_periods"],
             volatility_windows=feature_config["volatility_windows"],
@@ -185,9 +199,16 @@ class PreprocessingPipeline:
             macd_fast=feature_config["macd_fast"],
             macd_slow=feature_config["macd_slow"],
             macd_signal=feature_config["macd_signal"],
+            macd_include_histogram=feature_config["macd_include_histogram"],
             bb_window=feature_config["bb_window"],
             bb_std=feature_config["bb_std"],
+            bb_include_bands=feature_config["bb_include_bands"],
             include_calendar=feature_config["include_calendar"],
+            calendar_features=feature_config["calendar_features"],
+            include_atr=feature_config["include_atr"],
+            include_close_to_ma=feature_config["include_close_to_ma"],
+            close_to_ma_windows=feature_config["close_to_ma_windows"],
+            include_high_low_ratio=feature_config["include_high_low_ratio"],
             target_horizon=target_config["horizon"],
             target_type=target_config["type"],
         )
