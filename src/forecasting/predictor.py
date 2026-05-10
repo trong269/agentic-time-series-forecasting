@@ -10,6 +10,7 @@ import pandas as pd
 from src.ingestion import get_stock_data
 from src.preprocessing import preprocess_for_training
 from src.utils.config_manager import config_manager
+from src.utils.logger import logger
 from src.forecasting.models.xgboost_model import load_model
 
 
@@ -90,10 +91,13 @@ def predict_with_intervals(ticker: str, horizon: int = 7) -> dict:
             models = {}  # Partial load, trigger retrain
 
     if not models:
+        logger.warning("No models found, triggering retraining")
         # Fallback: retrain if no models exist
         from src.forecasting.trainer import train_xgboost_forecaster
         train_result = train_xgboost_forecaster(ticker)
         models = train_result["models"]
+    else:
+        logger.info(f"Loaded models from {version_dir.name}")
 
     # Compute holdout metrics: predict last N known days vs actuals
     holdout_metrics = _compute_holdout_metrics(ticker, models)
@@ -183,6 +187,11 @@ def predict_with_intervals(ticker: str, horizon: int = 7) -> dict:
         # Keep list manageable
         if len(close_list) > 100:
             close_list.pop(0)
+
+    logger.info(
+        f"Predictions generated for {ticker} | Horizon: {horizon} days | "
+        f"MAE: {holdout_metrics['MAE']:.2f}, MAPE: {holdout_metrics['MAPE']:.2%}"
+    )
 
     return {"ticker": ticker, "predictions": predictions, "holdout_metrics": holdout_metrics}
 

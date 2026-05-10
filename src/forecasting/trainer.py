@@ -9,6 +9,7 @@ from datetime import datetime
 
 from src.preprocessing import preprocess_for_training
 from src.utils.config_manager import config_manager
+from src.utils.logger import logger
 from src.forecasting.models.xgboost_model import train_xgb_quantile, save_model
 
 
@@ -94,6 +95,8 @@ def train_xgboost_forecaster(ticker: str) -> dict[str, Any]:
     y_train = result["y_train"]
     y_test = result["y_test"]
 
+    logger.info(f"Training model for {ticker} | Train: {len(X_train)}, Test: {len(X_test)}")
+
     # Train on X_train only (proper holdout - X_test is truly unseen)
     # Evaluate on full X_test for comparison with other versions
     models = {}
@@ -107,6 +110,11 @@ def train_xgboost_forecaster(ticker: str) -> dict[str, Any]:
     # Evaluate on full test set (non-recursive direct prediction)
     y_test_pred = models[0.50].predict(X_test)
     test_metrics = compute_metrics(y_test_pred, y_test.values)
+
+    logger.info(
+        f"Training complete | Version: {version} | "
+        f"MAE: {test_metrics['MAE']:.2f}, RMSE: {test_metrics['RMSE']:.2f}, MAPE: {test_metrics['MAPE']:.2%}"
+    )
 
     # Compute metrics for all quantile models (for drift detection reference)
     all_quantile_metrics = {}
