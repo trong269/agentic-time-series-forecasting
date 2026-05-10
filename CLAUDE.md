@@ -18,7 +18,7 @@ An end-to-end automated pipeline for time series forecasting focused on **NVDA s
 
 - `src/ingestion/` — Fetches daily stock data via **yfinance**. Writes to `data/`.
 - `src/preprocessing/` — Feature engineering for XGBoost: lag features, technical indicators, calendar features.
-- `src/forecasting/` — XGBoost model for 7-day price predictions.
+- `src/forecasting/` — XGBoost model for 7-day price predictions with quantile regression for confidence intervals.
 - `src/agents/` — AI agent that evaluates prediction quality, diagnoses model issues, and recommends adjustments.
 - `src/evaluation/` — Computes holdout metrics (MAE, RMSE, MAPE).
 - `src/reporting/` — Produces structured JSON reports and human-readable Markdown.
@@ -27,8 +27,8 @@ An end-to-end automated pipeline for time series forecasting focused on **NVDA s
 - `src/llm/` — LLM provider abstraction (Anthropic, OpenAI).
 - `scripts/` — Entry points: `run_daily_pipeline.py` (full pipeline), `train_model.py` (manual retraining).
 - `configs/` — YAML configuration for data sources, model params, and agent settings.
-- `artifacts/models/` — Serialized forecast models.
-- `artifacts/reports/` — Generated daily reports.
+- `artifacts/models/` — Serialized forecast models (versioned: `ver_N/`).
+- `artifacts/reports/` — Generated daily reports including prediction JSON.
 - `data/` — Raw ingested stock time series data stored in **SQLite** (`data/stocks.db`).
 
 ## Common Commands
@@ -49,6 +49,15 @@ python scripts/run_daily_pipeline.py
 # Retrain forecast model manually
 python scripts/train_model.py
 
+# Run prediction and save to JSON
+python -c "
+import json
+from src.forecasting.predictor import predict_with_intervals
+result = predict_with_intervals('NVDA', horizon=7)
+with open('artifacts/reports/prediction_result.json', 'w') as f:
+    json.dump(result, f, indent=2)
+"
+
 # Run tests
 pytest tests/
 
@@ -67,65 +76,47 @@ All settings managed via YAML configs in `configs/`. Environment variables (API 
 | `configs/app.yaml` | General app settings |
 | `configs/ingestion.yaml` | Data ingestion settings (ticker, lookback, retry) |
 | `configs/preprocessing.yaml` | Feature engineering settings (lags, technical indicators) |
-| `configs/model.yaml` | Model parameters |
+| `configs/model.yaml` | XGBoost model parameters, quantiles, artifacts directory |
 | `configs/agent.yaml` | Agent settings |
 
 ### Key Configuration Keys
 
-**`configs/ingestion.yaml`**
-```yaml
-ticker: "NVDA"           # Default ticker (can override in code)
-lookback_days: 730       # Days of historical data to fetch
-retry_attempts: 3
-retry_delay: 1.0
-db:
-  path: "data/stocks.db"
-  table_name: "stock_daily"
-```
-
-**`configs/preprocessing.yaml`**
+**`configs/preprocessing.yaml`** (May 2026 - updated)
 ```yaml
 features:
-  # Price lag features (selected important ones)
   price_lags: [1, 7, 30]
-
-  # Moving averages
   ma_windows: [7, 21, 50]
-
-  # MACD (signal line only, histogram dropped)
   macd_fast: 12
   macd_slow: 26
   macd_signal: 9
-
-  # Bollinger Bands (position only, bands dropped)
   bb_window: 20
   bb_std: 2
-
-  # Volatility (21d only)
   volatility_windows: [21]
-
-  # Calendar features (only important ones)
   include_calendar: true
   calendar_features: [quarter, month, week_of_year]
-
-  # Volume features (MA only, no lags)
-  volume_ma_windows: [7, 21]
-
-  # Returns (21d only)
+  # Note: volume_ma_windows and include_atr REMOVED - cannot be used in recursive prediction
   return_periods: [21]
-
-  # Other
-  include_atr: true
   include_close_to_ma: true
   close_to_ma_windows: [50]
 
 target:
-  horizon: 7                # Predict 7 days ahead
-  type: "close"             # Predict actual close price (not return)
+  horizon: 7
+  type: "close"
 
 split:
-  test_days: 60             # Last 60 days for testing
+  test_days: 60
   gap: 0
+```
+
+**`configs/model.yaml`**
+```yaml
+artifacts_dir: "artifacts/models/"
+quantiles: [0.025, 0.10, 0.50, 0.90, 0.975]
+xgb_params:
+  n_estimators: 100
+  max_depth: 6
+  learning_rate: 0.1
+  random_state: 42
 ```
 
 ---
@@ -164,15 +155,15 @@ split:
   - Return features: return_21d (only)
   - Moving averages: MA_7, MA_21, MA_50
   - Close-to-MA ratio: close_to_MA_50
-  - Volume features: volume_MA_7, volume_MA_21 (no raw volume or lags)
-  - Technical: MACD_signal, BB_position, ATR, volatility_21d
+  - Technical: MACD_signal, BB_position, volatility_21d
   - Calendar: quarter, month, week_of_year
+  - **Note: ATR and volume features REMOVED** - cannot be computed in recursive prediction without simulation
 
 - [x] **Technical Indicators** (`src/preprocessing/technical.py`)
   - `calculate_rsi()` — Relative Strength Index (not used in final model)
   - `calculate_macd()` — MACD line, signal, histogram (only signal used)
   - `calculate_bollinger_bands()` — Upper, middle, lower bands (only position used)
-  - `calculate_atr()` — Average True Range
+  - `calculate_atr()` — Average True Range (removed from features May 2026)
   - `calculate_volatility()` — Rolling standard deviation
 
 - [x] **Calendar Features** (`src/preprocessing/calendar.py`)
@@ -185,32 +176,45 @@ split:
 
 - [x] **Feature Selection** (May 2026)
   - Analyzed correlations and feature importance
-  - Reduced from 49 → 17 features based on correlation with target
-  - Dropped: open, high, low, close, volume (raw current-day values not known at prediction time)
-  - Dropped: RSI, volume_lags, return_1d/5d/7d, is_* flags, day_of_week, day_of_month
+  - Final: 14 features (reduced from 17)
+  - **Dropped features:** ATR, volume_MA_7, volume_MA_21 (require "current moment" data or simulation)
+  - **Dropped earlier:** open, high, low, close, volume, RSI, volume_lags, return_1d/5d/7d, is_* flags, day_of_week, day_of_month
 
-**Features Generated (17 features) - all predictive (lag-based or derived):**
-- Price lags: close_lag_1, close_lag_7, close_lag_30 (3)
-- Returns: return_21d (1)
-- Moving averages: MA_7, MA_21, MA_50, close_to_MA_50 (4)
-- Volume: volume_MA_7, volume_MA_21 (2)
-- Technical: MACD_signal, BB_position, ATR, volatility_21d (4)
-- Calendar: quarter, month, week_of_year (3)
+### Phase 3: Forecasting ✅ COMPLETED
 
-### Phase 3: Forecasting 🚧 IN PROGRESS
+- [x] **XGBoost Model** (`src/forecasting/models/xgboost_model.py`)
+  - `train_xgb_quantile(X_train, y_train, quantile, xgb_params)` — Train quantile regression model
+  - `save_model(model, path)` / `load_model(path)` — Persist to disk via joblib
 
-**Next: XGBoost Model Implementation**
+- [x] **Trainer** (`src/forecasting/trainer.py`)
+  - `train_xgboost_forecaster(ticker)` — Trains 5 XGBoost quantile models (0.025, 0.10, 0.50, 0.90, 0.975)
+  - Versioned model storage: `artifacts/models/ver_N/`
+  - Metadata saved: `metadata.json` with metrics, feature importance, train/test sizes
+  - **Fix (May 2026):** Removed data leakage - model now trains only on X_train, evaluates on X_test (proper holdout)
 
-- [ ] `src/forecasting/trainer.py` — XGBoost training
-- [ ] `src/forecasting/predictor.py` — 7-day prediction
-- [ ] `configs/model.yaml` — XGBoost hyperparameters
+- [x] **Predictor** (`src/forecasting/predictor.py`)
+  - `predict_with_intervals(ticker, horizon=7)` — 7-day recursive prediction with confidence intervals
+  - `_build_daily_features()` — Builds features from close_list only (no simulation needed)
+  - `_compute_holdout_metrics()` — Computes MAE, RMSE, MAPE on last 7 days of test set
+  - Output: JSON with predictions and holdout_metrics
+
+- [x] **Scripts** (`scripts/train_model.py`)
+  - Standalone model retraining script
+
+**Current Model Metrics (Version 4):**
+| Metric | Value |
+|--------|-------|
+| Train samples | 386 |
+| Test samples | 60 |
+| Test MAE | ~10.44 |
+| Test RMSE | ~13.20 |
+| Holdout MAE | ~19.74 (~9.6% MAPE) |
 
 ### Pending
 
 - [ ] Agent evaluation logic (`src/agents/`)
 - [ ] Reporting module (`src/reporting/`)
-- [ ] Scripts implementation (`run_daily_pipeline.py`, `train_model.py`)
-- [ ] Evaluation metrics (`src/evaluation/`)
+- [ ] Scripts implementation (`run_daily_pipeline.py`)
 - [ ] Test coverage
 
 ---
@@ -218,10 +222,27 @@ split:
 ## Data Flow
 
 1. **Ingestion** pulls stock data via yfinance and stores in SQLite (`data/stocks.db`)
-2. **Preprocessing** creates 17 features: price lags, returns, MAs, technical indicators, calendar
-3. **Forecasting** outputs 7-day price predictions (close, not return)
+2. **Preprocessing** creates 14 features: price lags, returns, MAs, technical indicators, calendar
+3. **Forecasting** outputs 7-day price predictions with quantile-based confidence intervals
 4. **Agent Evaluator** reads predictions, diagnoses issues, outputs structured feedback
 5. **Improvement Agent** receives feedback and adjusts model parameters or triggers retraining
+
+---
+
+## Feature Validation Rule (Critical)
+
+**Before adding any feature, verify it can be computed without "current moment" data:**
+
+| Feature Type | Example | Valid? |
+|--------------|---------|--------|
+| Lag-based | close_lag_1, close_lag_7 | ✅ Uses only past data |
+| Derived (past) | MA_7, return_21d, BB_position | ✅ Uses only past data |
+| Volume MA | volume_MA_7 | ❌ Stale in recursive prediction - cannot update without actual volume |
+| ATR | ATR | ❌ Requires future high/low (must simulate) |
+| Current day OHLCV | close, volume | ❌ Not known at prediction time |
+| Calendar | quarter, month | ✅ Available for forecast date |
+
+**Any feature requiring simulation or using "current moment" data MUST be excluded.**
 
 ---
 

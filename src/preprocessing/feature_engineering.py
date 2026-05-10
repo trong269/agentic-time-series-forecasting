@@ -5,7 +5,6 @@ from typing import Any
 import pandas as pd
 
 from .technical import (
-    calculate_atr,
     calculate_bollinger_bands,
     calculate_macd,
     calculate_rsi,
@@ -128,9 +127,7 @@ def create_technical_features(
     macd_signal: int = 9,
     bb_window: int = 20,
     bb_std: float = 2.0,
-    atr_period: int = 14,
     volatility_windows: list[int] = [21],
-    include_atr: bool = True,
     include_high_low_ratio: bool = False,
     bb_include_bands: bool = False,
     macd_include_histogram: bool = False,
@@ -142,9 +139,7 @@ def create_technical_features(
         rsi_period: RSI period (None to skip).
         macd_fast, macd_slow, macd_signal: MACD parameters.
         bb_window, bb_std: Bollinger Bands parameters.
-        atr_period: ATR period.
         volatility_windows: Windows for volatility calculation.
-        include_atr: Whether to include ATR.
         include_high_low_ratio: Whether to include high-low ratio.
         bb_include_bands: Whether to include BB upper/lower bands.
         macd_include_histogram: Whether to include MACD histogram.
@@ -165,8 +160,6 @@ def create_technical_features(
     result["MACD_signal"] = signal_line
     if macd_include_histogram:
         result["MACD_histogram"] = histogram
-    if macd_include_histogram:
-        result["MACD_histogram"] = histogram
 
     # Bollinger Bands position
     bb_upper, _, bb_lower = calculate_bollinger_bands(
@@ -176,12 +169,6 @@ def create_technical_features(
     if bb_include_bands:
         result["BB_upper"] = bb_upper
         result["BB_lower"] = bb_lower
-
-    # ATR (optional)
-    if include_atr:
-        result["ATR"] = calculate_atr(
-            result["high"], result["low"], result["close"], period=atr_period
-        )
 
     # Volatility (rolling std)
     for window in volatility_windows:
@@ -233,7 +220,6 @@ def create_target(
 def create_all_features(
     df: pd.DataFrame,
     price_lags: list[int] = [1, 7, 30],
-    volume_ma_windows: list[int] = [7, 21],
     ma_windows: list[int] = [7, 21, 50],
     return_periods: list[int] = [21],
     volatility_windows: list[int] = [21],
@@ -245,7 +231,6 @@ def create_all_features(
     bb_std: float = 2.0,
     include_calendar: bool = True,
     calendar_features: list[str] | None = None,
-    include_atr: bool = True,
     include_close_to_ma: bool = True,
     close_to_ma_windows: list[int] = [50],
     include_high_low_ratio: bool = False,
@@ -259,7 +244,6 @@ def create_all_features(
     Args:
         df: Input DataFrame with OHLCV and date columns.
         price_lags: Lag periods for price features.
-        volume_ma_windows: Windows for volume MA.
         ma_windows: Windows for moving averages.
         return_periods: Periods for return calculations.
         volatility_windows: Windows for volatility.
@@ -268,7 +252,6 @@ def create_all_features(
         bb_window, bb_std: Bollinger parameters.
         include_calendar: Whether to add calendar features.
         calendar_features: List of calendar features to include.
-        include_atr: Whether to include ATR.
         include_close_to_ma: Whether to add close_to_MA features.
         close_to_ma_windows: Windows for close_to_MA.
         include_high_low_ratio: Whether to include high_low_ratio.
@@ -296,9 +279,6 @@ def create_all_features(
         close_to_ma_windows=close_to_ma_windows
     )
 
-    # Volume features (no lags - only MA)
-    result = create_volume_features(result, ma_windows=volume_ma_windows)
-
     # Technical indicators
     result = create_technical_features(
         result,
@@ -309,7 +289,6 @@ def create_all_features(
         bb_window=bb_window,
         bb_std=bb_std,
         volatility_windows=volatility_windows,
-        include_atr=include_atr,
         include_high_low_ratio=include_high_low_ratio,
         bb_include_bands=bb_include_bands,
         macd_include_histogram=macd_include_histogram,

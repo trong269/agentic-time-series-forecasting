@@ -1,0 +1,16 @@
+xgb_params:
+  n_estimators: 200
+  max_depth: 5
+  learning_rate: 0.05
+  min_child_weight: 3
+  subsample: 0.8
+  colsample_bytree: 0.8
+
+quantiles:
+  - 0.025
+  - 0.10
+  - 0.50
+  - 0.90
+  - 0.975
+
+artifacts_dir: "artifacts/models/"

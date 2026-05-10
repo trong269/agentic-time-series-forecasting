@@ -68,32 +68,3 @@ def preprocess_for_training(ticker: str, config: dict | None = None) -> dict:
     result = pipeline.fit_transform(df)
 
     return result
-
-
-def preprocess_for_prediction(ticker: str, days: int = 60) -> dict:
-    """Preprocess recent data for prediction.
-
-    Args:
-        ticker: Stock ticker symbol.
-        days: Number of recent days to fetch.
-
-    Returns:
-        Dictionary with recent data and features.
-    """
-    from src.ingestion import get_stock_data
-
-    # Get recent data
-    df = get_stock_data(ticker)
-
-    # Take only last `days` rows
-    df_recent = df.tail(days).copy()
-
-    # Create features
-    from .feature_engineering import create_all_features
-
-    df_features = create_all_features(df_recent)
-
-    return {
-        "data": df_features,
-        "feature_columns": [col for col in df_features.columns if col not in ["date", "target"]],
-    }

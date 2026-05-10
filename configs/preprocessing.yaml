@@ -27,15 +27,12 @@ features:
   include_calendar: true
   calendar_features: [quarter, month, week_of_year]
 
-  # Volume features (only important ones)
-  volume_lags: []  # DROP - low correlation
-  volume_ma_windows: [7, 21]
 
   # Returns - keep only 21d (highest correlation)
   return_periods: [21]
 
+
   # Other features
-  include_atr: true
   include_close_to_ma: true
   close_to_ma_windows: [50]
   include_high_low_ratio: false

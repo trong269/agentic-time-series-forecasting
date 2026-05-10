@@ -32,7 +32,6 @@ class PreprocessingPipeline:
         features = self.config.get("features", {})
         return {
             "price_lags": features.get("price_lags", [1, 7, 30]),
-            "volume_ma_windows": features.get("volume_ma_windows", [7, 21]),
             "ma_windows": features.get("ma_windows", [7, 21, 50]),
             "return_periods": features.get("return_periods", [21]),
             "volatility_windows": features.get("volatility_windows", [21]),
@@ -46,10 +45,10 @@ class PreprocessingPipeline:
             "bb_include_bands": features.get("bb_include_bands", False),
             "include_calendar": features.get("include_calendar", True),
             "calendar_features": features.get("calendar_features", ["quarter", "month", "week_of_year"]),
-            "include_atr": features.get("include_atr", True),
             "include_close_to_ma": features.get("include_close_to_ma", True),
             "close_to_ma_windows": features.get("close_to_ma_windows", [50]),
             "include_high_low_ratio": features.get("include_high_low_ratio", False),
+            # Note: volume_ma_windows and include_atr removed - cannot be used in recursive prediction
         }
 
     def _get_target_config(self) -> dict[str, Any]:
@@ -104,7 +103,6 @@ class PreprocessingPipeline:
         df_features = create_all_features(
             df,
             price_lags=feature_config["price_lags"],
-            volume_ma_windows=feature_config["volume_ma_windows"],
             ma_windows=feature_config["ma_windows"],
             return_periods=feature_config["return_periods"],
             volatility_windows=feature_config["volatility_windows"],
@@ -118,7 +116,6 @@ class PreprocessingPipeline:
             bb_include_bands=feature_config["bb_include_bands"],
             include_calendar=feature_config["include_calendar"],
             calendar_features=feature_config["calendar_features"],
-            include_atr=feature_config["include_atr"],
             include_close_to_ma=feature_config["include_close_to_ma"],
             close_to_ma_windows=feature_config["close_to_ma_windows"],
             include_high_low_ratio=feature_config["include_high_low_ratio"],
@@ -191,7 +188,6 @@ class PreprocessingPipeline:
         df_features = create_all_features(
             df,
             price_lags=feature_config["price_lags"],
-            volume_ma_windows=feature_config["volume_ma_windows"],
             ma_windows=feature_config["ma_windows"],
             return_periods=feature_config["return_periods"],
             volatility_windows=feature_config["volatility_windows"],
@@ -205,7 +201,6 @@ class PreprocessingPipeline:
             bb_include_bands=feature_config["bb_include_bands"],
             include_calendar=feature_config["include_calendar"],
             calendar_features=feature_config["calendar_features"],
-            include_atr=feature_config["include_atr"],
             include_close_to_ma=feature_config["include_close_to_ma"],
             close_to_ma_windows=feature_config["close_to_ma_windows"],
             include_high_low_ratio=feature_config["include_high_low_ratio"],
