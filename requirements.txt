@@ -3,3 +3,9 @@ pandas
 python-dotenv
 pyyaml
 xgboost
+joblib
+
+# LLM / LangChain
+langchain-core
+langchain-openai
+langchain-google-genai

@@ -1,9 +1,30 @@
 """Centralized configuration manager for the project."""
 
+import os
+import re
 from pathlib import Path
 from typing import Any
 
 import yaml
+from dotenv import load_dotenv
+
+# Load .env file at module import
+load_dotenv()
+
+
+def _expand_env_vars(value: Any) -> Any:
+    """Recursively expand ${VAR:default} patterns in config values."""
+    if isinstance(value, str):
+        pattern = r'\$\{([^}:]+)(?::([^}]*))?\}'
+        def replacer(m):
+            var_name, default = m.group(1), m.group(2) or ''
+            return os.environ.get(var_name, default)
+        return re.sub(pattern, replacer, value)
+    elif isinstance(value, dict):
+        return {k: _expand_env_vars(v) for k, v in value.items()}
+    elif isinstance(value, list):
+        return [_expand_env_vars(item) for item in value]
+    return value
 
 
 class ConfigManager:
@@ -17,9 +38,9 @@ class ConfigManager:
     def _load_all(self) -> None:
         """Load all YAML config files from configs directory."""
         for yaml_file in self.configs_dir.glob("*.yaml"):
-            config_name = yaml_file.stem  # e.g., "app", "ingestion", "model"
-            config_path = yaml_file
-            self._configs[config_name] = self._load_yaml(config_path)
+            config_name = yaml_file.stem
+            config = self._load_yaml(yaml_file)
+            self._configs[config_name] = _expand_env_vars(config)
 
     def _load_yaml(self, path: Path) -> dict:
         """Load a single YAML file, return empty dict if file is empty or missing."""
