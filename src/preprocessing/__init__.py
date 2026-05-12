@@ -5,16 +5,8 @@ for XGBoost training and inference.
 """
 
 from .calendar import create_calendar_features
-from .feature_engineering import (
-    create_all_features,
-    create_lag_features,
-    create_moving_average_features,
-    create_return_features,
-    create_target,
-    create_technical_features,
-    create_volume_features,
-)
-from .pipeline import PreprocessingPipeline
+from .feature_functions import create_features, split_train_test, trim_dataframe
+from .pipeline import preprocess_data, preprocess_for_prediction
 from .technical import (
     calculate_atr,
     calculate_bollinger_bands,
@@ -24,16 +16,13 @@ from .technical import (
 from .validator import get_data_summary, handle_missing_values, validate_data
 
 __all__ = [
-    # Pipeline
-    "PreprocessingPipeline",
-    # Feature engineering
-    "create_all_features",
-    "create_lag_features",
-    "create_return_features",
-    "create_moving_average_features",
-    "create_volume_features",
-    "create_technical_features",
-    "create_target",
+    # Pipeline functions (agents use these)
+    "preprocess_data",
+    "preprocess_for_prediction",
+    # Feature functions (extracted for agent use)
+    "create_features",
+    "split_train_test",
+    "trim_dataframe",
     # Technical indicators
     "calculate_rsi",
     "calculate_macd",
@@ -48,7 +37,7 @@ __all__ = [
 ]
 
 
-def preprocess_for_training(ticker: str, config: dict | None = None) -> dict:
+def preprocess_for_training(ticker: str | None = None, config: dict | None = None) -> dict:
     """Preprocess stock data for XGBoost training.
 
     Args:
@@ -58,13 +47,5 @@ def preprocess_for_training(ticker: str, config: dict | None = None) -> dict:
     Returns:
         Dictionary with X_train, X_test, y_train, y_test, feature_columns.
     """
-    from src.ingestion import get_stock_data
-
-    # Get raw data from ingestion
-    df = get_stock_data(ticker)
-
-    # Create and run pipeline
-    pipeline = PreprocessingPipeline(ticker, config)
-    result = pipeline.fit_transform(df)
-
-    return result
+    from .pipeline import preprocess_for_training as _preprocess_for_training_impl
+    return _preprocess_for_training_impl(ticker, config)

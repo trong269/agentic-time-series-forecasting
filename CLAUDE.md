@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## System Overview
 
-An end-to-end automated pipeline for time series forecasting focused on **NVDA stock** using **yfinance** for live data ingestion. The system generates 7-day price predictions via ML models, then uses an AI agent (LangGraph) to evaluate, interpret, and act on those predictions.
+An end-to-end automated pipeline for time series forecasting focused on **NVDA stock** using **yfinance** for live data ingestion. The forecasting core is now a **one-step-ahead quantile XGBoost model** that is rolled forward recursively to produce a 7-day forecast with confidence intervals.
 
 ## Architecture
 
@@ -17,13 +17,11 @@ An end-to-end automated pipeline for time series forecasting focused on **NVDA s
 ### Directory Structure
 
 - `src/ingestion/` — Fetches daily stock data via **yfinance**. Writes to `data/`.
-- `src/preprocessing/` — Feature engineering for XGBoost: lag features, technical indicators, calendar features.
-- `src/forecasting/` — XGBoost model for 7-day price predictions with quantile regression for confidence intervals.
-- `src/agents/` — AI agent that evaluates prediction quality, diagnoses model issues, and recommends adjustments.
-- `src/evaluation/` — Computes holdout metrics (MAE, RMSE, MAPE).
-- `src/reporting/` — Produces structured JSON reports and human-readable Markdown.
+- `src/preprocessing/` — Feature engineering and train/test splitting for XGBoost.
+- `src/forecasting/` — One-step quantile XGBoost training and recursive multi-day prediction.
+- `src/agents/` — Agent scaffolding. Most agent logic is still pending.
 - `src/workflow/` — LangGraph orchestration (states, nodes, edges).
-- `src/tools/` — Agent tools (web search, data analysis, model control).
+- `src/tools/` — Agent tools scaffolding.
 - `src/llm/` — LLM provider abstraction (Anthropic, OpenAI).
 - `scripts/` — Entry points: `run_daily_pipeline.py` (full pipeline), `train_model.py` (manual retraining).
 - `configs/` — YAML configuration for data sources, model params, and agent settings.
@@ -35,13 +33,16 @@ An end-to-end automated pipeline for time series forecasting focused on **NVDA s
 
 ```bash
 # Fetch stock data
-python -c "from src.ingestion import fetch_stock_data; fetch_stock_data('NVDA')"
+python -c "from src.ingestion import fetch_stock_data; print(fetch_stock_data('NVDA'))"
 
 # Get stock data
 python -c "from src.ingestion import get_stock_data; df = get_stock_data('NVDA')"
 
-# Preprocess for training
+# Preprocess for training using project config
 python -c "from src.preprocessing import preprocess_for_training; result = preprocess_for_training('NVDA')"
+
+# Preprocess explicit DataFrame/config for agent use
+python -c "from src.ingestion import get_stock_data; from src.preprocessing import preprocess_data; from src.utils.config_manager import config_manager; df = get_stock_data('NVDA'); result = preprocess_data(df, config_manager.preprocessing)"
 
 # Run the full daily pipeline (ingest → forecast → evaluate → report)
 python scripts/run_daily_pipeline.py
@@ -58,8 +59,8 @@ with open('artifacts/reports/prediction_result.json', 'w') as f:
     json.dump(result, f, indent=2)
 "
 
-# Run tests
-pytest tests/
+# Run smoke test script
+python scripts/test_refactored.py
 
 # Install dependencies
 pip install -r requirements.txt
@@ -100,7 +101,7 @@ features:
   close_to_ma_windows: [50]
 
 target:
-  horizon: 7
+  horizon: 1
   type: "close"
 
 split:
@@ -135,28 +136,33 @@ xgb_params:
   - Incremental fetch: only fetches new data since last stored date
   - Exponential backoff retry for API resilience
   - Dynamic ticker support: any stock ticker works via parameter or config
+  - Returns structured error payloads instead of mixing raise/return behavior
+  - Current runtime limitation: network/DNS failures to Yahoo are surfaced cleanly, but not masked
 
 - [x] **SQLite Storage** (`src/ingestion/storage.py`)
   - `init_db(db_path, table_name)` — Create table with dynamic name
   - `upsert_data(db_path, df, ticker, table_name)` — Insert or replace
   - `get_data(db_path, ticker, start_date, end_date, table_name)` — Query
   - `get_latest_date(db_path, ticker, table_name)` — For incremental fetch
+  - Validates SQLite identifiers before interpolating table names
 
 ### Phase 2: Preprocessing ✅ COMPLETED
 
 - [x] **Preprocessing Pipeline** (`src/preprocessing/pipeline.py`)
-  - `PreprocessingPipeline` class with `fit_transform()` and `transform()`
+  - `preprocess_data(df, config)` — Explicit preprocessing entrypoint for agents
   - `preprocess_for_training(ticker)` — Convenience function
+  - `preprocess_for_prediction(ticker)` — Returns `df_raw`, `last_features`, `last_date`, `close_list`, `feature_columns`
   - Time-based train/test split (last 60 days for test)
   - Auto-excludes columns with all NaN values (e.g., `adj_close`)
 
-- [x] **Feature Engineering** (`src/preprocessing/feature_engineering.py`)
+- [x] **Feature Engineering** (`src/preprocessing/feature_functions.py`)
   - Price lag features: close_lag_1, close_lag_7, close_lag_30
   - Return features: return_21d (only)
   - Moving averages: MA_7, MA_21, MA_50
   - Close-to-MA ratio: close_to_MA_50
   - Technical: MACD_signal, BB_position, volatility_21d
   - Calendar: quarter, month, week_of_year
+  - Training and prediction feature builders are now aligned for recursive inference
   - **Note: ATR and volume features REMOVED** - cannot be computed in recursive prediction without simulation
 
 - [x] **Technical Indicators** (`src/preprocessing/technical.py`)
@@ -189,33 +195,60 @@ xgb_params:
 - [x] **Trainer** (`src/forecasting/trainer.py`)
   - `train_xgboost_forecaster(ticker)` — Trains 5 XGBoost quantile models (0.025, 0.10, 0.50, 0.90, 0.975)
   - Versioned model storage: `artifacts/models/ver_N/`
-  - Metadata saved: `metadata.json` with metrics, feature importance, train/test sizes
-  - **Fix (May 2026):** Removed data leakage - model now trains only on X_train, evaluates on X_test (proper holdout)
+  - Metadata saved: `metadata.json` with metrics, feature importance, feature columns, preprocessing/model config
+  - **Fix (May 2026):** Model trains on `X_train` only and evaluates on `X_test` holdout
+  - **Current contract:** training target is one-step-ahead close (`target.horizon: 1`)
 
 - [x] **Predictor** (`src/forecasting/predictor.py`)
   - `predict_with_intervals(ticker, horizon=7)` — 7-day recursive prediction with confidence intervals
-  - `_build_daily_features()` — Builds features from close_list only (no simulation needed)
+  - `build_prediction_features(close_list, feature_config, feature_date)` — Agent-ready explicit feature builder
+  - `predict_single_day(models, close_list, feature_config, feature_date)` — Agent-ready explicit one-step predictor
   - `_compute_holdout_metrics()` — Computes MAE, RMSE, MAPE on last 7 days of test set
+  - Quantile outputs are monotonized before returning intervals
   - Output: JSON with predictions and holdout_metrics
 
 - [x] **Scripts** (`scripts/train_model.py`)
   - Standalone model retraining script
 
-**Current Model Metrics (Version 4):**
+**Current Model Metrics (One-Step Contract, Version 20):**
 | Metric | Value |
 |--------|-------|
-| Train samples | 386 |
+| Train samples | 393 |
 | Test samples | 60 |
-| Test MAE | ~10.44 |
-| Test RMSE | ~13.20 |
-| Holdout MAE | ~19.74 (~9.6% MAPE) |
+| Test MAE | ~6.35 |
+| Test RMSE | ~8.97 |
+| Test MAPE | ~3.23% |
 
 ### Pending
 
 - [ ] Agent evaluation logic (`src/agents/`)
-- [ ] Reporting module (`src/reporting/`)
+- [ ] Reporting module
 - [ ] Scripts implementation (`run_daily_pipeline.py`)
-- [ ] Test coverage
+- [ ] Real test suite under `tests/` (current validation is `scripts/test_refactored.py`)
+
+### Agent-Ready Functions
+
+Prefer these explicit functions in future agents:
+
+- `src.ingestion.get_stock_data()`
+- `src.preprocessing.preprocess_data()`
+- `src.preprocessing.create_features()`
+- `src.preprocessing.split_train_test()`
+- `src.preprocessing.trim_dataframe()`
+- `src.forecasting.train_quantile_models()`
+- `src.forecasting.compute_metrics()`
+- `src.forecasting.build_prediction_features()`
+- `src.forecasting.predict_single_day()`
+- `src.forecasting.compute_holdout_metrics()`
+
+Convenience wrappers that still touch project config / DB / artifacts:
+
+- `src.ingestion.fetch_stock_data()`
+- `src.preprocessing.preprocess_for_training()`
+- `src.preprocessing.preprocess_for_prediction()`
+- `src.forecasting.train_xgboost_forecaster()`
+- `src.forecasting.load_models()`
+- `src.forecasting.predict_with_intervals()`
 
 ---
 
@@ -223,7 +256,7 @@ xgb_params:
 
 1. **Ingestion** pulls stock data via yfinance and stores in SQLite (`data/stocks.db`)
 2. **Preprocessing** creates 14 features: price lags, returns, MAs, technical indicators, calendar
-3. **Forecasting** outputs 7-day price predictions with quantile-based confidence intervals
+3. **Forecasting** trains a one-step quantile model and rolls it forward recursively for 7 trading days
 4. **Agent Evaluator** reads predictions, diagnoses issues, outputs structured feedback
 5. **Improvement Agent** receives feedback and adjusts model parameters or triggers retraining
 
@@ -308,6 +341,22 @@ For multi-step tasks, state a brief plan:
 
 Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
 
----
+### 5. Post-Task File Audit
+
+**After completing any task, list all modified files with change summaries.**
+
+Every completed task must include:
+1. **List of modified files** — exact file paths
+2. **Change summary per file** — what was changed, why, and how the logic differs from the old code
+3. **Output this list in the final response** so it is easy to review
+
+Format:
+```
+Modified files:
+- `src/foo/bar.py` — Added X to handle Y; old code did Z but failed when W.
+- `src/baz/qux.py` — Refactored X into a separate function to fix Y.
+```
+
+**Why:** This makes code reviews faster, keeps git history meaningful, and forces the author to verify each change is intentional rather than accidental.
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.

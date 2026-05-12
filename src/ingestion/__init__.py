@@ -83,8 +83,11 @@ def fetch_stock_data(ticker: str | None = None) -> dict:
             "date_range": (fetched_start, fetched_end),
         }
 
-    except IngestionError:
-        raise
+    except IngestionError as e:
+        return {
+            "status": "error",
+            "error": str(e),
+        }
     except Exception as e:
         return {
             "status": "error",

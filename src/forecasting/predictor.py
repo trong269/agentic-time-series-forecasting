@@ -7,11 +7,10 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from src.ingestion import get_stock_data
-from src.preprocessing import preprocess_for_training
 from src.utils.config_manager import config_manager
 from src.utils.logger import logger
 from src.forecasting.models.xgboost_model import load_model
+from src.preprocessing.technical import calculate_bollinger_bands, calculate_macd
 
 
 def _get_next_business_day(start_date: date) -> date:
@@ -34,6 +33,20 @@ def _ema(prices: np.ndarray, period: int) -> float:
 def _format_quantile(q: float) -> str:
     """Format quantile for model filename (e.g., 0.025 -> '0_025')."""
     return str(q).replace(".", "_")
+
+
+def _select_point_quantile(values: dict[float, Any]) -> float:
+    """Select the quantile used as the point forecast."""
+    if 0.50 in values:
+        return 0.50
+    return min(values, key=lambda q: abs(q - 0.50))
+
+
+def _monotonize_quantiles(values: dict[float, float]) -> dict[float, float]:
+    """Enforce non-decreasing predictions as quantiles increase."""
+    quantiles = sorted(values)
+    sorted_predictions = sorted(values[q] for q in quantiles)
+    return dict(zip(quantiles, sorted_predictions))
 
 
 def _get_latest_version_dir(artifacts_dir: Path) -> Path | None:
@@ -60,109 +73,307 @@ def _get_latest_version_dir(artifacts_dir: Path) -> Path | None:
     return max(versions, key=lambda x: x[0])[1]
 
 
-def predict_with_intervals(ticker: str, horizon: int = 7) -> dict:
-    """Generate 7-day recursive predictions with confidence intervals.
+# =============================================================================
+# EXTRACTED STANDALONE FUNCTIONS (for agent use)
+# =============================================================================
+
+
+def compute_holdout_metrics(y_actual: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
+    """Compute holdout metrics from actual and predicted values.
+
+    Pure function - no config reading, no data fetching.
+
+    Args:
+        y_actual: Actual target values.
+        y_pred: Predicted target values.
+
+    Returns:
+        Dict with MAE, RMSE, MAPE.
+    """
+    mae = float(np.mean(np.abs(y_pred - y_actual)))
+    rmse = float(np.sqrt(np.mean((y_pred - y_actual) ** 2)))
+    denominator = np.where(np.abs(y_actual) == 0, np.nan, np.abs(y_actual))
+    mape = float(np.nanmean(np.abs(y_pred - y_actual) / denominator))
+    return {"MAE": mae, "RMSE": rmse, "MAPE": mape}
+
+
+def build_prediction_features(
+    close_list: list,
+    feature_config: dict,
+    feature_date: date,
+) -> pd.DataFrame:
+    """Build single-row features for a forecast anchor date from close prices.
+
+    The returned row mirrors training-time features for the latest known or
+    recursively predicted close. With a one-step target, that row predicts the
+    next business day's close.
+
+    Args:
+        close_list: Full close-price history plus any recursive predictions.
+        feature_config: Feature config dict with keys:
+            - price_lags: list[int]
+            - ma_windows: list[int]
+            - return_periods: list[int]
+            - volatility_windows: list[int]
+            - macd_fast, macd_slow, macd_signal: int
+            - bb_window: int
+            - bb_std: float
+            - close_to_ma_windows: list[int]
+        feature_date: Date of the latest close represented by close_list[-1].
+
+    Returns:
+        DataFrame with single row of features.
+    """
+    price_lags = feature_config.get("price_lags", [1, 7, 30])
+    ma_windows = feature_config.get("ma_windows", [7, 21, 50])
+    return_periods = feature_config.get("return_periods", [21])
+    volatility_windows = feature_config.get("volatility_windows", [21])
+    macd_fast = feature_config.get("macd_fast", 12)
+    macd_slow = feature_config.get("macd_slow", 26)
+    macd_signal = feature_config.get("macd_signal", 9)
+    bb_window = feature_config.get("bb_window", 20)
+    bb_std = feature_config.get("bb_std", 2.0)
+    close_to_ma_windows = feature_config.get("close_to_ma_windows", [50])
+
+    close_arr = np.asarray(close_list, dtype=float)
+    close_series = pd.Series(close_arr)
+
+    features = {}
+
+    # Price lag features
+    for lag in price_lags:
+        if len(close_arr) >= lag + 1:
+            features[f"close_lag_{lag}"] = close_arr[-lag - 1]  # -1 because we need the value BEFORE prediction day
+        else:
+            features[f"close_lag_{lag}"] = np.nan
+
+    # Return features
+    for period in return_periods:
+        if len(close_arr) >= period + 1:
+            ret = (close_arr[-1] - close_arr[-period - 1]) / close_arr[-period - 1]
+            features[f"return_{period}d"] = ret
+        else:
+            features[f"return_{period}d"] = np.nan
+
+    # Moving averages include the anchor close, matching training preprocessing.
+    for window in ma_windows:
+        if len(close_arr) >= window:
+            features[f"MA_{window}"] = float(close_arr[-window:].mean())
+        else:
+            features[f"MA_{window}"] = np.nan
+
+    # Close-to-MA ratio
+    for window in close_to_ma_windows:
+        col = f"close_to_MA_{window}"
+        if len(close_arr) >= window:
+            ma = float(close_arr[-window:].mean())
+            features[col] = (close_arr[-1] - ma) / ma
+        else:
+            features[col] = np.nan
+
+    # Volatility
+    for window in volatility_windows:
+        if len(close_arr) >= window:
+            features[f"volatility_{window}d"] = float(close_series.iloc[-window:].std())
+        else:
+            features[f"volatility_{window}d"] = np.nan
+
+    # MACD
+    if len(close_arr) >= macd_slow:
+        _, signal_line, _ = calculate_macd(
+            close_series, fast=macd_fast, slow=macd_slow, signal=macd_signal
+        )
+        features["MACD_signal"] = float(signal_line.iloc[-1])
+    else:
+        features["MACD_signal"] = np.nan
+
+    # Bollinger Bands position
+    if len(close_arr) >= bb_window:
+        bb_upper_series, _, bb_lower_series = calculate_bollinger_bands(
+            close_series, window=bb_window, num_std=bb_std
+        )
+        bb_upper = float(bb_upper_series.iloc[-1])
+        bb_lower = float(bb_lower_series.iloc[-1])
+        if bb_upper > bb_lower:
+            features["BB_position"] = (close_arr[-1] - bb_lower) / (bb_upper - bb_lower)
+        else:
+            features["BB_position"] = 0.5
+    else:
+        features["BB_position"] = np.nan
+
+    # Calendar features
+    features["quarter"] = (feature_date.month - 1) // 3 + 1
+    features["month"] = feature_date.month
+    features["week_of_year"] = feature_date.isocalendar()[1]
+
+    # Return as single-row DataFrame
+    return pd.DataFrame([features])
+
+
+def predict_single_day(
+    models: dict,
+    close_list: list,
+    feature_config: dict,
+    feature_date: date,
+) -> dict[float, float]:
+    """Predict one day using loaded models.
+
+    Args:
+        models: Dict mapping quantiles to fitted XGBRegressor models.
+        close_list: Full close-price history plus any recursive predictions.
+        feature_config: Feature config dict (same as build_prediction_features).
+        feature_date: Date of the latest close represented by close_list[-1].
+
+    Returns:
+        Dict mapping quantiles to predicted values.
+    """
+    # Build features
+    features = build_prediction_features(close_list, feature_config, feature_date)
+
+    # Align features with model's expected column order
+    point_quantile = _select_point_quantile(models)
+    median_model = models[point_quantile]
+    if hasattr(median_model, "feature_names_in_"):
+        expected_features = median_model.feature_names_in_
+        for col in expected_features:
+            if col not in features.columns:
+                features[col] = np.nan
+        features = features[expected_features]
+
+    # Predict with each quantile model
+    pred_values = {}
+    for q, model in models.items():
+        pred_values[q] = float(model.predict(features)[0])
+
+    return _monotonize_quantiles(pred_values)
+
+
+def load_models(
+    ticker: str,
+    artifacts_dir: Path | None = None,
+    quantiles: list[float] | None = None,
+) -> dict:
+    """Load quantile models from the latest version directory.
+
+    Args:
+        ticker: Stock ticker symbol.
+        artifacts_dir: Base directory containing versioned model folders.
+                     If None, uses config_manager.model.get("artifacts_dir").
+
+    Returns:
+        Dict mapping quantiles to loaded models. Empty dict if no models found.
+    """
+    if artifacts_dir is None:
+        model_cfg = config_manager.model
+        artifacts_dir = Path(model_cfg.get("artifacts_dir", "artifacts/models/"))
+
+    quantiles = quantiles or config_manager.model.get("quantiles", [0.025, 0.10, 0.50, 0.90, 0.975])
+
+    version_dir = _get_latest_version_dir(artifacts_dir)
+    if version_dir is None:
+        return {}
+
+    models = {}
+    for q in quantiles:
+        model_path = version_dir / f"{ticker}_q{_format_quantile(q)}.pkl"
+        if model_path.exists():
+            models[q] = load_model(model_path)
+
+    return models
+
+
+# =============================================================================
+# MAIN PREDICTION FUNCTION
+# =============================================================================
+
+
+def predict_with_intervals(
+    ticker: str,
+    horizon: int = 7,
+    models: dict | None = None,
+    df_raw: pd.DataFrame | None = None,
+    feature_config: dict | None = None,
+    preprocessing_config: dict | None = None,
+    model_config: dict | None = None,
+) -> dict[str, Any]:
+    """Generate recursive predictions with confidence intervals.
+
+    This function accepts explicit parameters - no hidden config reading or data fetching
+    (except for fallback cases where models/df_raw are None).
 
     Args:
         ticker: Stock ticker symbol (e.g., "NVDA").
-        horizon: Number of days to forecast ahead.
+        horizon: Number of days to forecast ahead (default: 7).
+        models: Pre-loaded quantile models dict {quantile: model}. If None, auto-loads from disk.
+        df_raw: Pre-fetched raw stock DataFrame. If None, fetches from DB.
+        feature_config: Feature config dict. If None, uses preprocessing_config["features"].
+        preprocessing_config: Full preprocessing config for holdout metrics and fallback feature config.
+        model_config: Full model config for artifact loading and quantile selection.
 
     Returns:
         Dict containing:
         - predictions: List of daily prediction dicts with date, point_forecast, confidence_80, confidence_95
-        - holdout_metrics: Dict with MAE, RMSE, MAPE for last 7 known days (non-recursive direct prediction)
+        - holdout_metrics: Dict with MAE, RMSE, MAPE for last 7 known days
     """
-    model_cfg = config_manager.model
+    model_cfg = model_config or config_manager.model
+    preprocessing_cfg = preprocessing_config or config_manager.preprocessing
     artifacts_dir = Path(model_cfg.get("artifacts_dir", "artifacts/models/"))
     quantiles = model_cfg.get("quantiles", [0.025, 0.10, 0.50, 0.90, 0.975])
 
-    # Find latest version directory
-    version_dir = _get_latest_version_dir(artifacts_dir)
-
-    # Load models from latest version
-    models = {}
-    if version_dir is not None:
-        for q in quantiles:
-            model_path = version_dir / f"{ticker}_q{_format_quantile(q)}.pkl"
-            if model_path.exists():
-                models[q] = load_model(model_path)
-        # Check if all quantiles loaded successfully
-        if len(models) != len(quantiles):
-            models = {}  # Partial load, trigger retrain
+    # Load models if not provided
+    if models is None:
+        models = load_models(ticker, artifacts_dir, quantiles)
 
     if not models:
         logger.warning("No models found, triggering retraining")
-        # Fallback: retrain if no models exist
         from src.forecasting.trainer import train_xgboost_forecaster
-        train_result = train_xgboost_forecaster(ticker)
+        train_result = train_xgboost_forecaster(
+            ticker,
+            df=df_raw,
+            config={**preprocessing_cfg, "model": model_cfg},
+        )
         models = train_result["models"]
+        feature_config = feature_config or preprocessing_cfg.get("features", {})
     else:
-        logger.info(f"Loaded models from {version_dir.name}")
+        logger.info(f"Using pre-loaded models")
+
+    # Get feature config
+    if feature_config is None:
+        feature_config = preprocessing_cfg.get("features", {})
+
+    # Fetch raw data if not provided
+    if df_raw is None:
+        from src.ingestion import get_stock_data
+        df_raw = get_stock_data(ticker)
+        df_raw = df_raw.sort_values("date").reset_index(drop=True)
 
     # Compute holdout metrics: predict last N known days vs actuals
-    holdout_metrics = _compute_holdout_metrics(ticker, models)
+    holdout_metrics = _compute_holdout_metrics(
+        ticker,
+        models,
+        df_raw=df_raw,
+        preprocessing_config=preprocessing_cfg,
+        holdout_size=horizon,
+    )
 
-    # Get raw stock data for feature building
-    df_raw = get_stock_data(ticker)
-    df_raw = df_raw.sort_values("date").reset_index(drop=True)
-
-    # Last actual date in data
+    # Last actual or recursively predicted close date represented by close_list[-1].
     last_date = pd.to_datetime(df_raw["date"].iloc[-1]).date()
 
-    # Feature config
-    prep_cfg = config_manager.preprocessing
-    price_lags = prep_cfg.get("features", {}).get("price_lags", [1, 7, 30])
-    ma_windows = prep_cfg.get("features", {}).get("ma_windows", [7, 21, 50])
-    return_periods = prep_cfg.get("features", {}).get("return_periods", [21])
-    volatility_windows = prep_cfg.get("features", {}).get("volatility_windows", [21])
-    macd_fast = prep_cfg.get("features", {}).get("macd_fast", 12)
-    macd_slow = prep_cfg.get("features", {}).get("macd_slow", 26)
-    macd_signal = prep_cfg.get("features", {}).get("macd_signal", 9)
-    bb_window = prep_cfg.get("features", {}).get("bb_window", 20)
-    bb_std = prep_cfg.get("features", {}).get("bb_std", 2.0)
-    close_to_ma_windows = prep_cfg.get("features", {}).get("close_to_ma_windows", [50])
-
-    # Maintain rolling close list for recursive feature updates
-    close_list = df_raw["close"].iloc[-60:].tolist()
+    # Keep full close history so EMA-based features match training preprocessing.
+    close_list = df_raw["close"].tolist()
 
     predictions = []
 
     for _ in range(horizon):
-        forecast_date = _get_next_business_day(last_date)
-        last_date = forecast_date
+        feature_date = last_date
+        forecast_date = _get_next_business_day(feature_date)
 
-        # Build features for this day using recent close values
-        features = _build_daily_features(
-            close_list=close_list,
-            price_lags=price_lags,
-            ma_windows=ma_windows,
-            return_periods=return_periods,
-            volatility_windows=volatility_windows,
-            macd_fast=macd_fast,
-            macd_slow=macd_slow,
-            macd_signal=macd_signal,
-            bb_window=bb_window,
-            bb_std=bb_std,
-            close_to_ma_windows=close_to_ma_windows,
-            forecast_date=forecast_date,
-        )
-
-        # Ensure features match model's expected columns
-        model = models[0.50]  # Use median model for feature names
-        if hasattr(model, "feature_names_in_"):
-            expected_features = model.feature_names_in_
-            for col in expected_features:
-                if col not in features.columns:
-                    features[col] = np.nan
-            features = features[expected_features]
-
-        # Predict with each quantile model
-        pred_values = {}
-        for q, model in models.items():
-            pred_values[q] = float(model.predict(features)[0])
+        # Predict this day
+        pred_values = predict_single_day(models, close_list, feature_config, feature_date)
 
         # Extract point forecast and intervals
-        point = pred_values.get(0.50, pred_values.get(0.10, None))
+        point_quantile = _select_point_quantile(pred_values)
+        point = pred_values.get(point_quantile)
         lower_80 = pred_values.get(0.10, None)
         upper_80 = pred_values.get(0.90, None)
         lower_95 = pred_values.get(0.025, None)
@@ -170,7 +381,7 @@ def predict_with_intervals(ticker: str, horizon: int = 7) -> dict:
 
         predictions.append({
             "date": forecast_date.strftime("%Y-%m-%d"),
-            "point_forecast": round(float(point), 2),
+            "point_forecast": round(float(point), 2) if point is not None else None,
             "confidence_80": {
                 "lower": round(float(lower_80), 2) if lower_80 is not None else None,
                 "upper": round(float(upper_80), 2) if upper_80 is not None else None,
@@ -182,11 +393,9 @@ def predict_with_intervals(ticker: str, horizon: int = 7) -> dict:
         })
 
         # Update close list with prediction for recursive feature building
-        close_list.append(point)
-
-        # Keep list manageable
-        if len(close_list) > 100:
-            close_list.pop(0)
+        if point is not None:
+            close_list.append(point)
+            last_date = forecast_date
 
     logger.info(
         f"Predictions generated for {ticker} | Horizon: {horizon} days | "
@@ -196,8 +405,16 @@ def predict_with_intervals(ticker: str, horizon: int = 7) -> dict:
     return {"ticker": ticker, "predictions": predictions, "holdout_metrics": holdout_metrics}
 
 
-def _compute_holdout_metrics(ticker: str, models: dict) -> dict[str, float]:
-    """Compute holdout metrics on last N known days (configurable via config).
+def _compute_holdout_metrics(
+    ticker: str,
+    models: dict,
+    df_raw: pd.DataFrame | None = None,
+    preprocessing_config: dict | None = None,
+    holdout_size: int | None = None,
+) -> dict[str, float]:
+    """Compute holdout metrics on last N known days.
+
+    Internal function that uses preprocess_for_training for backward compatibility.
 
     Args:
         ticker: Stock ticker symbol.
@@ -206,122 +423,26 @@ def _compute_holdout_metrics(ticker: str, models: dict) -> dict[str, float]:
     Returns:
         Dict with MAE, RMSE, MAPE for median predictions.
     """
-    from src.preprocessing import preprocess_for_training
+    from src.preprocessing import preprocess_data, preprocess_for_training
 
-    horizon = config_manager.preprocessing.get("target", {}).get("horizon", 7)
+    cfg = preprocessing_config or config_manager.preprocessing
+    holdout_size = holdout_size or cfg.get("target", {}).get("horizon", 1)
 
     # Get preprocessing result to access train/test split
-    result = preprocess_for_training(ticker)
+    if df_raw is None:
+        result = preprocess_for_training(ticker, cfg)
+    else:
+        result = preprocess_data(df_raw, cfg)
     X_test = result["X_test"]
     y_test = result["y_test"]
 
-    # Last 'horizon' days of test set are holdout
-    y_holdout_actual = y_test.iloc[-horizon:].values
-    X_holdout = X_test.iloc[-horizon:]
+    # Last N rows of test set are holdout
+    y_holdout_actual = y_test.iloc[-holdout_size:].values
+    X_holdout = X_test.iloc[-holdout_size:]
 
     # Predict on holdout using median model (non-recursive for metrics computation)
-    y_holdout_pred = models[0.50].predict(X_holdout)
+    point_quantile = _select_point_quantile(models)
+    y_holdout_pred = models[point_quantile].predict(X_holdout)
 
-    # Compute metrics
-    mae = float(np.mean(np.abs(y_holdout_pred - y_holdout_actual)))
-    rmse = float(np.sqrt(np.mean((y_holdout_pred - y_holdout_actual) ** 2)))
-    mape = float(np.mean(np.abs(y_holdout_pred - y_holdout_actual) / np.abs(y_holdout_actual)))
-
-    return {"MAE": mae, "RMSE": rmse, "MAPE": mape}
-
-
-def _build_daily_features(
-    close_list: list,
-    price_lags: list[int],
-    ma_windows: list[int],
-    return_periods: list[int],
-    volatility_windows: list[int],
-    macd_fast: int,
-    macd_slow: int,
-    macd_signal: int,
-    bb_window: int,
-    bb_std: float,
-    close_to_ma_windows: list[int],
-    forecast_date: date,
-) -> pd.DataFrame:
-    """Build feature row for a single prediction day from recent close values.
-
-    Args:
-        close_list: List of recent close prices (actual + predicted so far).
-        forecast_date: The date being forecasted.
-
-    Returns:
-        DataFrame with single row of features.
-    """
-    close_arr = np.array(close_list)
-
-    features = {}
-
-    # Price lag features
-    for lag in price_lags:
-        if len(close_arr) >= lag:
-            features[f"close_lag_{lag}"] = close_arr[-lag - 1]  # -1 because we need the value BEFORE prediction day
-        else:
-            features[f"close_lag_{lag}"] = np.nan
-
-    # Return features
-    for period in return_periods:
-        if len(close_arr) >= period + 1:
-            ret = (close_arr[-2] - close_arr[-period - 2]) / close_arr[-period - 2]
-            features[f"return_{period}d"] = ret
-        else:
-            features[f"return_{period}d"] = np.nan
-
-    # Moving averages (based on closes before prediction day)
-    closes_before_pred = close_arr[:-1] if len(close_arr) > 1 else close_arr
-    for window in ma_windows:
-        if len(closes_before_pred) >= window:
-            features[f"MA_{window}"] = np.mean(closes_before_pred[-window:])
-        else:
-            features[f"MA_{window}"] = np.nan
-
-    # Close-to-MA ratio
-    if 50 in close_to_ma_windows and len(closes_before_pred) >= 50:
-        ma_50 = np.mean(closes_before_pred[-50:])
-        features["close_to_MA_50"] = (closes_before_pred[-1] - ma_50) / ma_50
-    else:
-        features["close_to_MA_50"] = np.nan
-
-    # Volatility
-    for window in volatility_windows:
-        if len(closes_before_pred) >= window:
-            features[f"volatility_{window}d"] = np.std(closes_before_pred[-window:])
-        else:
-            features[f"volatility_{window}d"] = np.nan
-
-    # MACD
-    if len(closes_before_pred) >= macd_slow:
-        ema_fast = _ema(closes_before_pred, macd_fast)
-        ema_slow = _ema(closes_before_pred, macd_slow)
-        macd_line = ema_fast - ema_slow
-        # Signal line approximation using exponential smoothing
-        signal_alpha = 2 / (macd_signal + 1)
-        features["MACD_signal"] = macd_line * signal_alpha + features.get("MACD_signal", macd_line) * (1 - signal_alpha)
-    else:
-        features["MACD_signal"] = np.nan
-
-    # Bollinger Bands position
-    if len(closes_before_pred) >= bb_window:
-        bb_mean = np.mean(closes_before_pred[-bb_window:])
-        bb_std_val = np.std(closes_before_pred[-bb_window:])
-        bb_upper = bb_mean + bb_std * bb_std_val
-        bb_lower = bb_mean - bb_std * bb_std_val
-        if bb_upper > bb_lower:
-            features["BB_position"] = (closes_before_pred[-1] - bb_lower) / (bb_upper - bb_lower)
-        else:
-            features["BB_position"] = 0.5
-    else:
-        features["BB_position"] = np.nan
-
-    # Calendar features
-    features["quarter"] = (forecast_date.month - 1) // 3 + 1
-    features["month"] = forecast_date.month
-    features["week_of_year"] = forecast_date.isocalendar()[1]
-
-    # Return as single-row DataFrame
-    return pd.DataFrame([features])
+    # Compute metrics using the pure function
+    return compute_holdout_metrics(y_holdout_actual, y_holdout_pred)

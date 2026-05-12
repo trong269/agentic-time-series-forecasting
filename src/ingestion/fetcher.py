@@ -5,6 +5,7 @@ from datetime import date, timedelta
 from typing import Any
 
 import yfinance as yf
+from yfinance.exceptions import YFException
 
 from .exceptions import FetchError
 
@@ -43,7 +44,7 @@ def fetch_with_retry(
 
             return df
 
-        except yf.YFinanceError as e:
+        except YFException as e:
             last_error = e
             if "404" in str(e) or "Not Found" in str(e):
                 raise FetchError(f"Ticker '{ticker}' not found") from e

@@ -10,6 +10,13 @@ import pandas as pd
 from .exceptions import StorageError
 
 
+def _validate_identifier(identifier: str) -> str:
+    """Validate a SQLite identifier that cannot be parameterized."""
+    if not identifier or not identifier.replace("_", "").isalnum() or identifier[0].isdigit():
+        raise StorageError(f"Invalid SQLite identifier: {identifier}")
+    return identifier
+
+
 def init_db(db_path: str | Path, table_name: str = "stock_daily") -> None:
     """Create the database and stock_daily table if they don't exist.
 
@@ -19,6 +26,7 @@ def init_db(db_path: str | Path, table_name: str = "stock_daily") -> None:
     """
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    table_name = _validate_identifier(table_name)
 
     create_table_sql = f"""
     CREATE TABLE IF NOT EXISTS {table_name} (
@@ -61,6 +69,7 @@ def upsert_data(db_path: str | Path, df: pd.DataFrame, ticker: str, table_name: 
     if df.empty:
         return 0
 
+    table_name = _validate_identifier(table_name)
     fetched_at = datetime.now(timezone.utc).isoformat()
 
     insert_sql = f"""
@@ -87,6 +96,8 @@ def upsert_data(db_path: str | Path, df: pd.DataFrame, ticker: str, table_name: 
             df_normalized = df_normalized.reset_index()
             if "Date" in df_normalized.columns:
                 df_normalized = df_normalized.rename(columns={"Date": "date"})
+            elif "Datetime" in df_normalized.columns:
+                df_normalized = df_normalized.rename(columns={"Datetime": "date"})
             elif df_normalized.index.name == "Date" or df_normalized.index.name is None:
                 df_normalized["date"] = df_normalized.index.strftime("%Y-%m-%d")
                 df_normalized = df_normalized.reset_index(drop=True)
@@ -140,6 +151,7 @@ def get_data(
     Raises:
         StorageError: If database query fails.
     """
+    table_name = _validate_identifier(table_name)
     query = f"SELECT date, open, high, low, close, adj_close, volume FROM {table_name} WHERE ticker = ?"
     params: list[Any] = [ticker]
 
@@ -174,6 +186,7 @@ def get_latest_date(db_path: str | Path, ticker: str, table_name: str = "stock_d
     Raises:
         StorageError: If database query fails.
     """
+    table_name = _validate_identifier(table_name)
     query = f"SELECT MAX(date) FROM {table_name} WHERE ticker = ?"
 
     try:

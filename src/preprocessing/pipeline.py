@@ -1,4 +1,4 @@
-"""Main preprocessing pipeline for XGBoost."""
+"""Preprocessing functions for XGBoost training and prediction."""
 
 from typing import Any
 
@@ -6,207 +6,156 @@ import pandas as pd
 
 from src.utils.config_manager import config_manager
 
-from .feature_engineering import create_all_features
+from .feature_functions import create_features, split_train_test, trim_dataframe
 from .validator import handle_missing_values, validate_data
 
 
-class PreprocessingPipeline:
-    """End-to-end preprocessing pipeline for XGBoost training."""
+def preprocess_data(df: pd.DataFrame, config: dict) -> dict[str, Any]:
+    """One-shot preprocessing: create features + trim + split.
 
-    def __init__(self, ticker: str, config: dict | None = None):
-        """Initialize preprocessing pipeline.
+    This is the core preprocessing function that agents can call directly
+    with explicit config and DataFrame.
 
-        Args:
-            ticker: Stock ticker symbol (e.g., "NVDA").
-            config: Optional config override. If None, uses config_manager.
-        """
-        self.ticker = ticker
-        self.config = config or config_manager.preprocessing
+    Args:
+        df: Input DataFrame with OHLCV columns and date.
+        config: Full preprocessing config dict (from config_manager.preprocessing).
 
-        # Feature columns will be set during fit
-        self.feature_columns: list[str] = []
-        self.target_column = "target"
+    Returns:
+        Dictionary with X_train, X_test, y_train, y_test, feature_columns.
+    """
+    # Validate data
+    is_valid, errors = validate_data(df)
+    if not is_valid:
+        raise ValueError(f"Data validation failed: {errors}")
 
-    def _get_feature_config(self) -> dict[str, Any]:
-        """Get feature engineering configuration."""
-        features = self.config.get("features", {})
-        return {
-            "price_lags": features.get("price_lags", [1, 7, 30]),
-            "ma_windows": features.get("ma_windows", [7, 21, 50]),
-            "return_periods": features.get("return_periods", [21]),
-            "volatility_windows": features.get("volatility_windows", [21]),
-            "rsi_period": features.get("rsi_period"),
-            "macd_fast": features.get("macd_fast", 12),
-            "macd_slow": features.get("macd_slow", 26),
-            "macd_signal": features.get("macd_signal", 9),
-            "macd_include_histogram": features.get("macd_include_histogram", False),
-            "bb_window": features.get("bb_window", 20),
-            "bb_std": features.get("bb_std", 2.0),
-            "bb_include_bands": features.get("bb_include_bands", False),
-            "include_calendar": features.get("include_calendar", True),
-            "calendar_features": features.get("calendar_features", ["quarter", "month", "week_of_year"]),
-            "include_close_to_ma": features.get("include_close_to_ma", True),
-            "close_to_ma_windows": features.get("close_to_ma_windows", [50]),
-            "include_high_low_ratio": features.get("include_high_low_ratio", False),
-            # Note: volume_ma_windows and include_atr removed - cannot be used in recursive prediction
-        }
+    df = handle_missing_values(df, fill_method="ffill")
 
-    def _get_target_config(self) -> dict[str, Any]:
-        """Get target variable configuration."""
-        target = self.config.get("target", {})
-        return {
-            "horizon": target.get("horizon", 7),
-            "type": target.get("type", "return"),
-        }
+    features_cfg = config.get("features", {})
+    target_cfg = config.get("target", {})
+    split_cfg = config.get("split", {})
 
-    def _get_split_config(self) -> dict[str, Any]:
-        """Get train/test split configuration."""
-        split = self.config.get("split", {})
-        return {
-            "test_days": split.get("test_days", 60),
-            "gap": split.get("gap", 0),
-        }
+    # Determine max lag and horizon
+    price_lags = features_cfg.get("price_lags", [1, 7, 30])
+    max_lag = max(price_lags)
+    target_horizon = target_cfg.get("horizon", 1)
+    test_days = split_cfg.get("test_days", 60)
+    gap = split_cfg.get("gap", 0)
 
-    def fit_transform(self, df: pd.DataFrame) -> dict[str, Any]:
-        """Fit on training data and transform.
+    # Create all features
+    full_config = {"features": features_cfg, "target": target_cfg}
+    df_features = create_features(df, full_config)
 
-        Args:
-            df: Input DataFrame with OHLCV columns and date.
+    # Get feature columns (exclude all-NaN columns)
+    exclude_cols = ["date", "target"]
+    all_feature_cols = [col for col in df_features.columns if col not in exclude_cols]
+    feature_columns = [col for col in all_feature_cols if df_features[col].notna().any()]
 
-        Returns:
-            Dictionary with keys:
-            - X_train, X_test: Feature DataFrames
-            - y_train, y_test: Target Series
-            - feature_columns: List of feature column names
-            - train_dates, test_dates: Date ranges for each split
-        """
-        # Validate data
-        is_valid, errors = validate_data(df)
-        if not is_valid:
-            raise ValueError(f"Data validation failed: {errors}")
+    # Trim
+    df_trimmed = trim_dataframe(df_features, feature_columns, max_lag, target_horizon)
 
-        # Handle missing values
-        df = handle_missing_values(df, fill_method="ffill")
+    # Split
+    split_result = split_train_test(
+        df_trimmed,
+        feature_columns,
+        target_column="target",
+        test_days=test_days,
+        gap=gap,
+    )
 
-        # Get configs
-        feature_config = self._get_feature_config()
-        target_config = self._get_target_config()
-        split_config = self._get_split_config()
+    return {
+        "X_train": split_result["X_train"],
+        "X_test": split_result["X_test"],
+        "y_train": split_result["y_train"],
+        "y_test": split_result["y_test"],
+        "feature_columns": feature_columns,
+        "train_size": split_result["train_size"],
+        "test_size": split_result["test_size"],
+    }
 
-        # Determine max lag and horizon for trimming
-        max_price_lag = max(feature_config["price_lags"])
-        # Volume has no lags now, only MA windows
-        max_lag = max_price_lag
-        target_horizon = target_config["horizon"]
 
-        # Create all features
-        df_features = create_all_features(
-            df,
-            price_lags=feature_config["price_lags"],
-            ma_windows=feature_config["ma_windows"],
-            return_periods=feature_config["return_periods"],
-            volatility_windows=feature_config["volatility_windows"],
-            rsi_period=feature_config["rsi_period"],
-            macd_fast=feature_config["macd_fast"],
-            macd_slow=feature_config["macd_slow"],
-            macd_signal=feature_config["macd_signal"],
-            macd_include_histogram=feature_config["macd_include_histogram"],
-            bb_window=feature_config["bb_window"],
-            bb_std=feature_config["bb_std"],
-            bb_include_bands=feature_config["bb_include_bands"],
-            include_calendar=feature_config["include_calendar"],
-            calendar_features=feature_config["calendar_features"],
-            include_close_to_ma=feature_config["include_close_to_ma"],
-            close_to_ma_windows=feature_config["close_to_ma_windows"],
-            include_high_low_ratio=feature_config["include_high_low_ratio"],
-            target_horizon=target_horizon,
-            target_type=target_config["type"],
-        )
+def preprocess_for_training(ticker: str | None = None, config: dict | None = None) -> dict[str, Any]:
+    """Preprocess stock data for XGBoost training (high-level wrapper).
 
-        # Store feature columns, excluding columns that are all NaN
-        exclude_cols = ["date", "target"]
-        all_feature_cols = [col for col in df_features.columns if col not in exclude_cols]
-        # Remove columns that are all NaN (like adj_close for recent data)
-        self.feature_columns = [col for col in all_feature_cols if df_features[col].notna().any()]
+    This function fetches data from DB and runs pipeline.
+    Agents should use preprocess_data() directly for explicit control.
 
-        # Trim initial rows with NaN from lags and final rows with NaN from target
-        # Keep rows from index max_lag onwards, and exclude last target_horizon rows
-        trim_start = max_lag
-        trim_end = target_horizon
+    Args:
+        ticker: Stock ticker symbol. If None, uses config default.
+        config: Optional config override. If None, uses config_manager.preprocessing.
 
-        df_trimmed = df_features.iloc[trim_start:-trim_end] if trim_end > 0 else df_features.iloc[trim_start:]
-        df_trimmed = df_trimmed.dropna(subset=self.feature_columns)
+    Returns:
+        Dictionary with X_train, X_test, y_train, y_test, feature_columns.
+    """
+    from src.ingestion import get_stock_data
 
-        # Time-based split
-        test_days = split_config["test_days"]
-        gap = split_config["gap"]
+    cfg = config or config_manager.preprocessing
+    ticker = ticker or cfg.get("ticker", "NVDA")
 
-        # Split data chronologically
-        if gap > 0:
-            train_end = len(df_trimmed) - test_days - gap
-            X_train = df_trimmed.iloc[:train_end][self.feature_columns]
-            y_train = df_trimmed.iloc[:train_end][self.target_column]
-            X_test = df_trimmed.iloc[train_end + gap :][self.feature_columns]
-            y_test = df_trimmed.iloc[train_end + gap :][self.target_column]
-        else:
-            train_end = len(df_trimmed) - test_days
-            X_train = df_trimmed.iloc[:train_end][self.feature_columns]
-            y_train = df_trimmed.iloc[:train_end][self.target_column]
-            X_test = df_trimmed.iloc[train_end:][self.feature_columns]
-            y_test = df_trimmed.iloc[train_end:][self.target_column]
+    df = get_stock_data(ticker)
+    return preprocess_data(df, cfg)
 
-        return {
-            "X_train": X_train,
-            "X_test": X_test,
-            "y_train": y_train,
-            "y_test": y_test,
-            "feature_columns": self.feature_columns,
-            "train_size": len(X_train),
-            "test_size": len(X_test),
-        }
 
-    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Transform new data using fitted pipeline.
+def preprocess_for_prediction(ticker: str, config: dict | None = None) -> dict[str, Any]:
+    """Prepare data for prediction - fetch recent data and create features.
 
-        Args:
-            df: Input DataFrame with same structure as fit().
+    This function fetches the most recent stock data and prepares it for the
+    prediction pipeline. Returns both the raw DataFrame and the last row's features.
 
-        Returns:
-            DataFrame with only feature columns.
-        """
-        if not self.feature_columns:
-            raise RuntimeError("Pipeline not fitted. Call fit_transform() first.")
+    Args:
+        ticker: Stock ticker symbol (e.g., "NVDA").
+        config: Optional config override. If None, uses config_manager.preprocessing.
 
-        # Handle missing values
-        df = handle_missing_values(df, fill_method="ffill")
+    Returns:
+        Dictionary with:
+        - df_raw: Raw DataFrame with available stock history
+        - last_features: DataFrame with single row of features for the last available day
+        - last_date: The date of the last available data
+        - close_list: Full close-price history for recursive prediction
+    """
+    from src.ingestion import get_stock_data
 
-        # Get configs
-        feature_config = self._get_feature_config()
-        target_config = self._get_target_config()
+    cfg = config or config_manager.preprocessing
 
-        # Create features
-        df_features = create_all_features(
-            df,
-            price_lags=feature_config["price_lags"],
-            ma_windows=feature_config["ma_windows"],
-            return_periods=feature_config["return_periods"],
-            volatility_windows=feature_config["volatility_windows"],
-            rsi_period=feature_config["rsi_period"],
-            macd_fast=feature_config["macd_fast"],
-            macd_slow=feature_config["macd_slow"],
-            macd_signal=feature_config["macd_signal"],
-            macd_include_histogram=feature_config["macd_include_histogram"],
-            bb_window=feature_config["bb_window"],
-            bb_std=feature_config["bb_std"],
-            bb_include_bands=feature_config["bb_include_bands"],
-            include_calendar=feature_config["include_calendar"],
-            calendar_features=feature_config["calendar_features"],
-            include_close_to_ma=feature_config["include_close_to_ma"],
-            close_to_ma_windows=feature_config["close_to_ma_windows"],
-            include_high_low_ratio=feature_config["include_high_low_ratio"],
-            target_horizon=target_config["horizon"],
-            target_type=target_config["type"],
-        )
+    df_raw = get_stock_data(ticker)
+    df_raw = df_raw.sort_values("date").reset_index(drop=True)
 
-        # Return only feature columns
-        return df_features[self.feature_columns]
+    # Validate and handle missing
+    is_valid, errors = validate_data(df_raw)
+    if not is_valid:
+        raise ValueError(f"Data validation failed: {errors}")
+
+    df_raw = handle_missing_values(df_raw, fill_method="ffill")
+
+    # Get configs
+    features_cfg = cfg.get("features", {})
+    target_cfg = cfg.get("target", {})
+
+    full_config = {"features": features_cfg, "target": target_cfg}
+
+    # Create features
+    df_features = create_features(df_raw, full_config)
+
+    # Get feature columns
+    exclude_cols = ["date", "target"]
+    feature_columns = [
+        col for col in df_features.columns
+        if col not in exclude_cols and df_features[col].notna().any()
+    ]
+
+    # Get last row with valid features
+    df_valid = df_features.dropna(subset=feature_columns)
+    if df_valid.empty:
+        raise ValueError("No valid features after preprocessing")
+
+    last_row = df_valid.iloc[[-1]]
+
+    # Keep full close history so EMA-based features match training preprocessing.
+    close_list = df_raw["close"].tolist()
+
+    return {
+        "df_raw": df_raw,
+        "last_features": last_row[feature_columns],
+        "last_date": pd.to_datetime(df_raw["date"].iloc[-1]).date(),
+        "close_list": close_list,
+        "feature_columns": feature_columns,
+    }

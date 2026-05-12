@@ -39,7 +39,7 @@ features:
 
 # Target variable
 target:
-  horizon: 7                # Predict 7 days ahead
+  horizon: 1                # One-step target; prediction recursively rolls forward 7 days
   type: "close"             # "close" price or "return" or "direction"
 
 # Train/test split
