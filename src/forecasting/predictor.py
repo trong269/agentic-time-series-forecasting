@@ -252,13 +252,15 @@ def load_models(
     ticker: str,
     artifacts_dir: Path | None = None,
     quantiles: list[float] | None = None,
+    version_dir: Path | None = None,
 ) -> dict:
-    """Load quantile models from the latest version directory.
+    """Load quantile models from a version directory or the latest version.
 
     Args:
         ticker: Stock ticker symbol.
         artifacts_dir: Base directory containing versioned model folders.
                      If None, uses config_manager.model.get("artifacts_dir").
+        version_dir: Explicit directory such as artifacts/models/ver_20.
 
     Returns:
         Dict mapping quantiles to loaded models. Empty dict if no models found.
@@ -269,7 +271,10 @@ def load_models(
 
     quantiles = quantiles or config_manager.model.get("quantiles", [0.025, 0.10, 0.50, 0.90, 0.975])
 
-    version_dir = _get_latest_version_dir(artifacts_dir)
+    if version_dir is None and artifacts_dir.name.startswith("ver_"):
+        version_dir = artifacts_dir
+    elif version_dir is None:
+        version_dir = _get_latest_version_dir(artifacts_dir)
     if version_dir is None:
         return {}
 
