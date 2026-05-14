@@ -1,0 +1,9 @@
+observability:
+  langfuse:
+    enabled: ${LANGFUSE_ENABLED:false}
+    # Set LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, and LANGFUSE_HOST in .env.
+    # Use https://cloud.langfuse.com or https://us.cloud.langfuse.com depending on your Langfuse region.
+    user_id: ${LANGFUSE_USER_ID:}
+    flush_on_exit: ${LANGFUSE_FLUSH_ON_EXIT:true}
+    tags:
+      - daily-forecasting

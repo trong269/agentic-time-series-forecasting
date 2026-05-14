@@ -1,6 +1,5 @@
 """Prompt factory to load and format markdown prompts."""
 
-import os
 from pathlib import Path
 from string import Template
 from typing import Any

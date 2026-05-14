@@ -1,13 +1,21 @@
 yfinance
+numpy
 pandas
 python-dotenv
 pyyaml
+python-dateutil
 xgboost
 joblib
+scikit-learn
 
 # LLM / LangChain
+langchain
 langchain-core
 langchain-openai
 langchain-google-genai
 langgraph
+langfuse
 tavily-python
+
+# Test runner
+pytest

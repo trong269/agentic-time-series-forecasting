@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
-from typing import Dict, Any, List
+from typing import Any
 
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph
 
 from ..utils.logger import get_logger
@@ -54,18 +55,18 @@ class BaseAgent(ABC):
         self.compiled_graph = self.graph.compile()
         logger.info(f"Compiled graph for agent: {self.name}")
 
-    def invoke(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+    def invoke(self, input_data: dict[str, Any], config: RunnableConfig | None = None) -> dict[str, Any]:
         """
         Synchronous invoke - executes the compiled graph
 
         Parameters
         ----------
-        input_data : Dict[str, Any]
+            input_data : dict[str, Any]
             Input data for the agent
 
         Returns
         -------
-        Dict[str, Any]
+            dict[str, Any]
             Agent response
         """
         if self.compiled_graph is None:
@@ -73,7 +74,7 @@ class BaseAgent(ABC):
 
         try:
 
-            result = self.compiled_graph.invoke(input_data)
+            result = self.compiled_graph.invoke(input_data, config=config)
             return result
         except Exception as e:
             logger.error(f"Error during invoke: {e}")
@@ -82,25 +83,25 @@ class BaseAgent(ABC):
                 "error": str(e)
             }
 
-    async def ainvoke(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+    async def ainvoke(self, input_data: dict[str, Any], config: RunnableConfig | None = None) -> dict[str, Any]:
         """
         Asynchronous invoke - executes the compiled graph asynchronously
 
         Parameters
         ----------
-        input_data : Dict[str, Any]
+            input_data : dict[str, Any]
             Input data for the agent
 
         Returns
         -------
-        Dict[str, Any]
+            dict[str, Any]
             Agent response
         """
         if self.compiled_graph is None:
             self.compile()
 
         try:
-            result = await self.compiled_graph.ainvoke(input_data)
+            result = await self.compiled_graph.ainvoke(input_data, config=config)
             return result
         except Exception as e:
             logger.error(f"Error during ainvoke: {e}")

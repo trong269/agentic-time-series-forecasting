@@ -5,8 +5,10 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph
 
+from src.utils.langfuse import build_langfuse_runnable_config, flush_langfuse
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -33,22 +35,36 @@ class BaseWorkflow(ABC):
         self.compiled_graph = self.graph.compile()
         logger.info(f"Compiled graph for workflow: {self.name}")
 
-    def invoke(self, input_data: dict[str, Any]) -> dict[str, Any]:
+    def invoke(self, input_data: dict[str, Any], config: RunnableConfig | None = None) -> dict[str, Any]:
         """Synchronously execute the compiled workflow graph."""
         if self.compiled_graph is None:
             self.compile()
+        runnable_config = build_langfuse_runnable_config(
+            workflow_name=self.name,
+            input_data=input_data,
+            base_config=config,
+        )
         try:
-            return self.compiled_graph.invoke(input_data)
+            return self.compiled_graph.invoke(input_data, config=runnable_config)
         except Exception as exc:
             logger.error(f"Error during workflow invoke: {exc}")
             return {"success": False, "error": str(exc), **input_data}
+        finally:
+            flush_langfuse()
 
-    async def ainvoke(self, input_data: dict[str, Any]) -> dict[str, Any]:
+    async def ainvoke(self, input_data: dict[str, Any], config: RunnableConfig | None = None) -> dict[str, Any]:
         """Asynchronously execute the compiled workflow graph."""
         if self.compiled_graph is None:
             self.compile()
+        runnable_config = build_langfuse_runnable_config(
+            workflow_name=self.name,
+            input_data=input_data,
+            base_config=config,
+        )
         try:
-            return await self.compiled_graph.ainvoke(input_data)
+            return await self.compiled_graph.ainvoke(input_data, config=runnable_config)
         except Exception as exc:
             logger.error(f"Error during workflow ainvoke: {exc}")
             return {"success": False, "error": str(exc), **input_data}
+        finally:
+            flush_langfuse()

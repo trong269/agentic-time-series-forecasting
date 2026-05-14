@@ -16,7 +16,6 @@ import numpy as np
 import pandas as pd
 
 from src.forecasting import load_models, predict_with_intervals
-from src.forecasting.trainer import train_xgboost_forecaster
 from src.tools.tavily_search import search_tavily_news
 from src.utils.config_manager import config_manager
 from src.utils.logger import get_logger
@@ -56,10 +55,12 @@ def predict_node(state: ForecastingAgentState) -> ForecastingAgentState:
     ticker = state["ticker"]
     df_raw = state["df_raw"].copy()
     df_raw = df_raw.sort_values("date").reset_index(drop=True)
+    model_path = Path(state["model_path"])
     
     models = state["loaded_models"]
     preprocessing_config = state.get("preprocessing_config") or config_manager.preprocessing
     model_config = state.get("model_config") or config_manager.model
+    agent_config = state.get("agent_config") or config_manager.agent
     horizon = int(state.get("horizon", 7))
 
     forecast = predict_with_intervals(
@@ -74,20 +75,18 @@ def predict_node(state: ForecastingAgentState) -> ForecastingAgentState:
     
     state["predictions"] = forecast["predictions"]
     state["holdout_metrics"] = forecast["holdout_metrics"]
-    return state
-
-
-def evaluate_holdout_node(state: ForecastingAgentState) -> ForecastingAgentState:
-    ticker = state["ticker"]
-    model_path = Path(state["model_path"])
     predictions = state["predictions"]
-    df_raw = state["df_raw"]
     
     avg_80_width_pct = _average_interval_width_pct(predictions, "confidence_80")
     avg_95_width_pct = _average_interval_width_pct(predictions, "confidence_95")
     latest_close = float(df_raw["close"].iloc[-1])
     last_point = float(predictions[-1]["point_forecast"]) if predictions else latest_close
     forecast_return = ((last_point - latest_close) / latest_close) * 100.0 if latest_close else 0.0
+    live_mape = _compute_live_mape_from_previous_reports(
+        df_raw,
+        ticker,
+        agent_config,
+    )
 
     state["forecasting_output"] = {
         "ticker": ticker,
@@ -101,6 +100,7 @@ def evaluate_holdout_node(state: ForecastingAgentState) -> ForecastingAgentState
             "avg_95_width_pct": round(avg_95_width_pct, 4),
             "forecast_7d_return_pct": round(forecast_return, 4),
             "latest_close": latest_close,
+            "live_mape": live_mape,
         },
     }
     return state
@@ -121,6 +121,37 @@ def _average_interval_width_pct(predictions: list[dict[str, Any]], interval_key:
         if point and lower is not None and upper is not None:
             widths.append(((float(upper) - float(lower)) / abs(float(point))) * 100.0)
     return float(sum(widths) / len(widths)) if widths else 0.0
+
+
+def _compute_live_mape_from_previous_reports(
+    df_raw: pd.DataFrame,
+    ticker: str,
+    agent_config: dict[str, Any],
+) -> float | None:
+    """Compare previous published forecasts with actual closes now in df_raw."""
+    if "date" not in df_raw.columns:
+        return None
+
+    report_cfg = agent_config.get("reporter", {})
+    report_dir = report_cfg.get("reports_dir", "artifacts/reports")
+    df_actuals = df_raw.copy()
+    df_actuals["date"] = pd.to_datetime(df_actuals["date"]).dt.date.astype(str)
+    actual_by_date: dict[str, float] = dict(
+        zip(df_actuals["date"], df_actuals["close"].astype(float))
+    )
+
+    errors: list[float] = []
+    for report in load_previous_reports(report_dir, ticker, limit=14):
+        for pred in report.get("forecasting", {}).get("predictions", []):
+            pred_date = str(pred.get("date", ""))[:10]
+            actual = actual_by_date.get(pred_date)
+            if actual is None or actual <= 0:
+                continue
+            predicted = safe_float(pred.get("point_forecast"))
+            if predicted > 0:
+                errors.append(abs(actual - predicted) / actual)
+
+    return float(sum(errors) / len(errors)) if errors else None
 
 
 # =============================================================================
@@ -151,52 +182,11 @@ def gather_news_node(state: EvaluatorAgentState) -> EvaluatorAgentState:
     return state
 
 
-def compute_live_accuracy_node(state: EvaluatorAgentState) -> EvaluatorAgentState:
-    """Compare prior forecasts against actual close prices to compute live MAPE.
-
-    Uses the previous daily reports stored in artifacts/reports. For each
-    report, finds predictions whose dates now exist in df_recent (i.e. the
-    actual price is known) and computes the absolute percentage error.
-    This live_mape is a stronger signal than holdout_mape because it measures
-    real-world forecast accuracy rather than in-sample test-set accuracy.
-    """
-    cfg = state.get("agent_config") or config_manager.agent
-    report_dir = cfg.get("reporter", {}).get("reports_dir", "artifacts/reports")
-    ticker = state.get("ticker") or state["forecasting_output"]["ticker"]
-    df_recent = state["df_recent"].copy()
-
-    # Build a date → actual_close lookup from df_recent
-    if "date" not in df_recent.columns:
-        state["live_mape"] = None
-        return state
-    df_recent["date"] = pd.to_datetime(df_recent["date"]).dt.date.astype(str)
-    actual_by_date: dict[str, float] = dict(
-        zip(df_recent["date"], df_recent["close"].astype(float))
-    )
-
-    prev_reports = load_previous_reports(report_dir, ticker, limit=14)
-
-    errors: list[float] = []
-    for report in prev_reports:
-        for pred in report.get("forecasting", {}).get("predictions", []):
-            pred_date = str(pred.get("date", ""))[:10]
-            actual = actual_by_date.get(pred_date)
-            if actual is None or actual <= 0:
-                continue
-            predicted = safe_float(pred.get("point_forecast"))
-            if predicted > 0:
-                errors.append(abs(actual - predicted) / actual)
-
-    live_mape = float(sum(errors) / len(errors)) if errors else None
-    state["live_mape"] = live_mape
-    return state
-
-
 def calculate_technical_risk_node(state: EvaluatorAgentState) -> EvaluatorAgentState:
     forecasting_output = state["forecasting_output"]
     df_recent = state["df_recent"].copy()
     news_context = state["news_context"]
-    live_mape = state.get("live_mape")  # may be None if no prior forecasts exist
+    live_mape = forecasting_output.get("forecast_diagnostics", {}).get("live_mape")
 
     risk_breakdown = calculate_risk_breakdown(forecasting_output, df_recent, news_context, live_mape)
     state["risk_breakdown"] = risk_breakdown
@@ -550,12 +540,14 @@ def summarize_decision(decision_band: str, risk_breakdown: dict[str, float]) -> 
 # =============================================================================
 
 
-def assess_trend_node(state: ReporterAgentState) -> ReporterAgentState:
+def decide_action_node(state: ReporterAgentState) -> ReporterAgentState:
     ticker = state.get("ticker") or state["forecasting_output"]["ticker"]
     cfg = state.get("agent_config") or config_manager.agent
+    evaluator_cfg = cfg.get("evaluator", {})
     reporter_cfg = cfg.get("reporter", {})
     report_dir = Path(reporter_cfg.get("reports_dir", "artifacts/reports"))
     history_n = int(reporter_cfg.get("history_n", 7))
+    degradation_threshold = float(reporter_cfg.get("strong_degradation_threshold", 8.0))
     
     previous_reports = state.get("previous_reports")
     if previous_reports is None:
@@ -569,90 +561,345 @@ def assess_trend_node(state: ReporterAgentState) -> ReporterAgentState:
     trend = assess_history_trend(
         score,
         previous_reports,
-        float(reporter_cfg.get("strong_degradation_threshold", 8.0)),
+        degradation_threshold,
     )
-    
-    state["composite_score"] = score
-    state["trend_assessment"] = trend
-    state["previous_reports"] = previous_reports
-    return state
-
-
-def determine_action_node(state: ReporterAgentState) -> ReporterAgentState:
-    evaluation_output = state["evaluation_output"]
     is_retrain = bool(state.get("is_retrain", False))
-    cfg = state.get("agent_config") or config_manager.agent
-    evaluator_cfg = cfg.get("evaluator", {})
-    trend = state["trend_assessment"]
 
     trust_score = safe_float(evaluation_output.get("trust_score"))
     accept_threshold = float(evaluator_cfg.get("accept_threshold", 70))
     retrain_threshold = float(evaluator_cfg.get("retrain_threshold", 50))
+    trend_factors = _build_reporter_trend_factors(
+        state=state,
+        ticker=ticker,
+        report_dir=report_dir,
+        history_n=history_n,
+        current_composite=score,
+        score_trend=trend,
+        previous_reports=previous_reports,
+    )
+    trend = _classify_reporter_trend(trend, trend_factors)
 
     forced_action = state.get("forced_action")
     forced_reason = state.get("forced_reason")
     if forced_action:
         action = forced_action
         reason = forced_reason or "Action forced by workflow."
-    elif trust_score < retrain_threshold and not is_retrain:
-        action = "retrain"
-        reason = f"Trust score {trust_score:.2f} is below retrain threshold {retrain_threshold:.2f}."
     elif is_retrain:
         action = "accept_after_retrain"
         reason = "Retrained model accepted for final reporting."
+    elif trust_score < retrain_threshold and not is_retrain:
+        model_signal = safe_float(trend_factors.get("model_failure_signal"))
+        persistence = safe_float(trend_factors.get("risk_persistence_score"))
+        market_signal = safe_float(trend_factors.get("market_regime_shift_signal"))
+        news_signal = safe_float(trend_factors.get("news_driven_signal"))
+        if max(market_signal, news_signal) >= 70 and model_signal < 55 and persistence < 65:
+            action = "accept"
+            reason = (
+                f"Trust score {trust_score:.2f} is below retrain threshold, but recent reports indicate "
+                "the risk is primarily market/news driven rather than persistent model failure."
+            )
+        else:
+            action = "retrain"
+            reason = f"Trust score {trust_score:.2f} is below retrain threshold {retrain_threshold:.2f}."
     elif trust_score >= accept_threshold:
         action = "accept"
         reason = f"Trust score {trust_score:.2f} meets accept threshold {accept_threshold:.2f}."
-    elif trend == "degrading":
+    elif trend in {"degrading", "degrading_model"}:
         action = "retrain"
-        reason = "Trust score is in warning band and composite score is degrading versus history."
+        reason = (
+            "Trust score is in warning band and history indicates persistent model degradation."
+        )
+    elif (
+        safe_float(trend_factors.get("risk_persistence_score")) >= 75
+        and safe_float(trend_factors.get("model_failure_signal")) >= 60
+    ):
+        action = "retrain"
+        reason = "Trust score is in warning band with persistent model-risk signals in prior reports."
     else:
         action = "accept"
         reason = f"Trust score {trust_score:.2f} is in warning band; no strong degradation found."
-        
+
+    state["composite_score"] = score
+    state["trend_assessment"] = trend
+    state["trend_factors"] = trend_factors
+    state["previous_reports"] = previous_reports
     state["action"] = action
     state["reason"] = reason
     return state
 
 
-def generate_markdown_report_node(state: ReporterAgentState) -> ReporterAgentState:
-    """Use LLM to generate the full markdown report content.
-
-    Builds a rich, context-aware prompt from all available pipeline outputs
-    and asks the LLM to author a professional analyst report in Markdown.
-    Falls back to an empty string so that format_report_node can use the
-    rule-based writer as a safety net.
-    """
+def _build_reporter_trend_factors(
+    *,
+    state: ReporterAgentState,
+    ticker: str,
+    report_dir: Path,
+    history_n: int,
+    current_composite: float,
+    score_trend: str,
+    previous_reports: list[dict[str, Any]],
+) -> dict[str, Any]:
+    fallback = _rule_based_trend_factors(
+        state=state,
+        current_composite=current_composite,
+        score_trend=score_trend,
+        previous_reports=previous_reports,
+    )
     llm = state.get("llm")
-    state["llm_markdown"] = ""  # default: empty → fallback to rule-based
-
     if not llm:
-        return state
+        return fallback
 
+    markdown_reports = _load_previous_markdown_reports(report_dir, ticker, history_n)
+    if not markdown_reports:
+        return fallback
+
+    extracted = _extract_trend_factors_with_llm(
+        llm=llm,
+        markdown_reports=markdown_reports,
+        forecasting_output=state["forecasting_output"],
+        evaluation_output=state["evaluation_output"],
+        fallback=fallback,
+    )
+    if safe_float(extracted.get("llm_confidence")) < 0.35:
+        return fallback
+    return extracted
+
+
+def _rule_based_trend_factors(
+    *,
+    state: ReporterAgentState,
+    current_composite: float,
+    score_trend: str,
+    previous_reports: list[dict[str, Any]],
+) -> dict[str, Any]:
+    previous_scores = [
+        safe_float(report.get("reporter", {}).get("composite_score"))
+        for report in previous_reports
+        if report.get("reporter", {}).get("composite_score") is not None
+    ]
+    previous_avg = float(sum(previous_scores) / len(previous_scores)) if previous_scores else current_composite
+    score_delta = current_composite - previous_avg
+    risk = state["evaluation_output"].get("risk_breakdown", {})
+    top_risks = sorted(risk.items(), key=lambda item: safe_float(item[1]), reverse=True)[:3]
+    top_risk_names = [name for name, _ in top_risks]
+    model_failure_signal = max(
+        safe_float(risk.get("holdout_mape_risk")),
+        safe_float(risk.get("holdout_rmse_pct_risk")),
+        safe_float(risk.get("interval_width_risk")),
+    )
+    market_signal = safe_float(risk.get("recent_volatility_risk"))
+    news_signal = safe_float(risk.get("news_risk"))
+    direction_signal = safe_float(risk.get("trend_alignment_risk"))
+    risk_persistence = clamp(
+        max(model_failure_signal, direction_signal) + max(0.0, -score_delta) * 2.0,
+        0.0,
+        100.0,
+    )
+    return {
+        "source": "rules",
+        "historical_pattern": score_trend,
+        "score_delta": round(score_delta, 2),
+        "previous_composite_avg": round(previous_avg, 2),
+        "repeated_top_risks": top_risk_names,
+        "risk_persistence_score": round(risk_persistence, 2),
+        "model_failure_signal": round(model_failure_signal, 2),
+        "market_regime_shift_signal": round(market_signal, 2),
+        "news_driven_signal": round(news_signal, 2),
+        "forecast_direction_error_signal": round(direction_signal, 2),
+        "retrain_effectiveness": _rule_based_retrain_effectiveness(previous_reports),
+        "llm_confidence": 0.0,
+        "rationale": "Rule-based fallback from current risk breakdown and historical composite scores.",
+    }
+
+
+def _extract_trend_factors_with_llm(
+    *,
+    llm: Any,
+    markdown_reports: list[dict[str, str]],
+    forecasting_output: dict[str, Any],
+    evaluation_output: dict[str, Any],
+    fallback: dict[str, Any],
+) -> dict[str, Any]:
+    reports_payload = json.dumps(markdown_reports, ensure_ascii=True)[:24000]
+    current_payload = json.dumps(
+        {
+            "forecasting_output": _compact_forecasting_output(forecasting_output),
+            "evaluation_output": evaluation_output,
+            "fallback_rule_factors": fallback,
+        },
+        default=str,
+        ensure_ascii=True,
+    )[:12000]
+    try:
+        prompt = prompt_factory.get_prompt(
+            "reporter_trend_extractor",
+            markdown_reports=reports_payload,
+            current_context=current_payload,
+        )
+        response = llm.invoke(prompt)
+        raw_text = getattr(response, "content", str(response)).strip()
+        parsed = _parse_json_object(raw_text)
+        return _normalize_trend_factors(parsed, fallback)
+    except Exception as exc:
+        fallback = dict(fallback)
+        fallback["rationale"] = f"Rule-based fallback because LLM trend extraction failed: {exc}"
+        return fallback
+
+
+def _compact_forecasting_output(forecasting_output: dict[str, Any]) -> dict[str, Any]:
+    predictions = forecasting_output.get("predictions", [])
+    return {
+        "ticker": forecasting_output.get("ticker"),
+        "model_version": forecasting_output.get("model_version"),
+        "model_path": forecasting_output.get("model_path"),
+        "holdout_metrics": forecasting_output.get("holdout_metrics", {}),
+        "forecast_diagnostics": forecasting_output.get("forecast_diagnostics", {}),
+        "prediction_count": len(predictions),
+        "first_prediction": predictions[0] if predictions else None,
+        "last_prediction": predictions[-1] if predictions else None,
+    }
+
+
+def _parse_json_object(text: str) -> dict[str, Any]:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("```", 2)[1]
+        if cleaned.startswith("json"):
+            cleaned = cleaned[4:]
+    try:
+        data = json.loads(cleaned.strip())
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+        if not match:
+            raise
+        data = json.loads(match.group(0))
+    if not isinstance(data, dict):
+        raise ValueError("Expected a JSON object from trend extractor.")
+    return data
+
+
+def _normalize_trend_factors(data: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
+    historical_pattern = str(data.get("historical_pattern") or fallback["historical_pattern"]).strip().lower()
+    if historical_pattern not in {"improving", "stable", "degrading", "volatile", "insufficient", "mixed"}:
+        historical_pattern = fallback["historical_pattern"]
+    repeated_top_risks = data.get("repeated_top_risks")
+    if not isinstance(repeated_top_risks, list):
+        repeated_top_risks = fallback["repeated_top_risks"]
+    normalized = dict(fallback)
+    normalized.update({
+        "source": "llm",
+        "historical_pattern": historical_pattern,
+        "repeated_top_risks": [str(item) for item in repeated_top_risks[:5]],
+        "risk_persistence_score": round(clamp(safe_float(data.get("risk_persistence_score")), 0.0, 100.0), 2),
+        "model_failure_signal": round(clamp(safe_float(data.get("model_failure_signal")), 0.0, 100.0), 2),
+        "market_regime_shift_signal": round(clamp(safe_float(data.get("market_regime_shift_signal")), 0.0, 100.0), 2),
+        "news_driven_signal": round(clamp(safe_float(data.get("news_driven_signal")), 0.0, 100.0), 2),
+        "forecast_direction_error_signal": round(clamp(safe_float(data.get("forecast_direction_error_signal")), 0.0, 100.0), 2),
+        "retrain_effectiveness": str(data.get("retrain_effectiveness") or fallback["retrain_effectiveness"]),
+        "llm_confidence": round(clamp(safe_float(data.get("confidence", data.get("llm_confidence"))), 0.0, 1.0), 2),
+        "rationale": str(data.get("rationale") or fallback["rationale"])[:600],
+    })
+    return normalized
+
+
+def _classify_reporter_trend(score_trend: str, trend_factors: dict[str, Any]) -> str:
+    model_signal = safe_float(trend_factors.get("model_failure_signal"))
+    persistence = safe_float(trend_factors.get("risk_persistence_score"))
+    market_signal = safe_float(trend_factors.get("market_regime_shift_signal"))
+    news_signal = safe_float(trend_factors.get("news_driven_signal"))
+    historical_pattern = str(trend_factors.get("historical_pattern", score_trend))
+    if model_signal >= 70 and persistence >= 65:
+        return "degrading_model"
+    if max(market_signal, news_signal) >= 70 and model_signal < 55:
+        return "external_risk"
+    if historical_pattern in {"degrading", "volatile", "mixed"}:
+        return historical_pattern
+    return score_trend
+
+
+def generate_report_node(state: ReporterAgentState) -> ReporterAgentState:
+    """Generate and persist the final JSON and Markdown reports."""
     forecasting_output = state["forecasting_output"]
     evaluation_output = state["evaluation_output"]
     ticker = state.get("ticker") or forecasting_output["ticker"]
+    run_date = state.get("run_date") or date.today().isoformat()
+    cfg = state.get("agent_config") or config_manager.agent
+    reporter_cfg = cfg.get("reporter", {})
+    report_dir = Path(reporter_cfg.get("reports_dir", "artifacts/reports"))
+    report_dir.mkdir(parents=True, exist_ok=True)
+
+    # Always use a single canonical filename. The final report after retrain overwrites the initial one.
+    json_path = report_dir / f"{run_date}_{ticker}_report.json"
+    md_path = report_dir / f"{run_date}_{ticker}_report.md"
+    insight_summary = state.get("insight_summary") or _build_report_insight_summary(state)
+
+    reporter_output = {
+        "action": state["action"],
+        "reason": state["reason"],
+        "insight_summary": insight_summary,
+        "trend_assessment": state["trend_assessment"],
+        "trend_factors": state.get("trend_factors", {}),
+        "is_retrain": bool(state.get("is_retrain", False)),
+        "report_paths": {"json": str(json_path), "markdown": str(md_path)},
+        "composite_score": state["composite_score"],
+    }
+    payload = {
+        "ticker": ticker,
+        "run_id": state.get("run_id"),
+        "run_date": run_date,
+        "forecasting": forecasting_output,
+        "evaluation": evaluation_output,
+        "reporter": reporter_output,
+        "improvement": state.get("improvement_output"),
+    }
+    write_json_report(json_path, payload)
+
+    llm_markdown = _generate_report_markdown_with_llm(state, payload)
+    if llm_markdown:
+        with open(md_path, "w") as f:
+            f.write(llm_markdown.rstrip() + "\n")
+    else:
+        write_markdown_report(md_path, payload)
+
+    state["insight_summary"] = insight_summary
+    state["reporter_output"] = reporter_output
+    return state
+
+
+def _build_report_insight_summary(state: ReporterAgentState) -> str:
+    evaluation = state["evaluation_output"]
+    risk = evaluation.get("risk_breakdown", {})
+    trend_factors = state.get("trend_factors", {})
+    top_risks = sorted(risk.items(), key=lambda item: safe_float(item[1]), reverse=True)[:3]
+    top_risk_text = ", ".join(f"{name}={safe_float(value):.1f}" for name, value in top_risks) or "none"
+    source = trend_factors.get("source", "rules")
+    rationale = str(trend_factors.get("rationale", "")).strip()
+    if rationale:
+        rationale = f" Trend evidence ({source}): {rationale}"
+    return (
+        f"Action={state['action']} with trust score {safe_float(evaluation.get('trust_score')):.2f} "
+        f"and composite score {safe_float(state.get('composite_score')):.2f}. "
+        f"Primary risks: {top_risk_text}. "
+        f"Trend assessment={state.get('trend_assessment', 'unknown')}. "
+        f"Reason: {state['reason']}."
+        f"{rationale}"
+    )
+
+
+def _generate_report_markdown_with_llm(
+    state: ReporterAgentState,
+    payload: dict[str, Any],
+) -> str:
+    llm = state.get("llm")
+    if not llm:
+        return ""
+
+    forecasting_output = payload["forecasting"]
+    evaluation_output = payload["evaluation"]
+    reporter_output = payload["reporter"]
+    ticker = payload["ticker"]
     improvement = state.get("improvement_output") or {}
 
-    # Build forecast table string for the prompt
     forecast_table = _build_forecast_table(forecasting_output.get("predictions", []))
-
-    # Summarise improvement outcome
-    if improvement.get("is_retrain"):
-        improvement_info = (
-            f"Retrain attempted. Promoted: {improvement.get('promoted')}. "
-            f"Reason: {improvement.get('reason', '')}. "
-            f"New model v{improvement.get('new_model_version')} composite "
-            f"{improvement.get('new_composite_score', 0):.2f} vs old "
-            f"{improvement.get('old_composite_score', 0):.2f}."
-        )
-    elif improvement.get("skip_retrain") is True or (
-        improvement and not improvement.get("is_retrain")
-    ):
-        improvement_info = improvement.get("reason", "No retrain performed.")
-    else:
-        improvement_info = "No retrain performed."
-
     metrics = forecasting_output.get("holdout_metrics", {})
     holdout_str = (
         f"MAE={metrics.get('MAE', 0):.4f}, "
@@ -664,32 +911,60 @@ def generate_markdown_report_node(state: ReporterAgentState) -> ReporterAgentSta
         prompt = prompt_factory.get_prompt(
             "reporter_agent_markdown",
             ticker=ticker,
-            run_date=state.get("run_date", date.today().isoformat()),
+            run_date=payload.get("run_date", date.today().isoformat()),
             model_version=forecasting_output.get("model_version", "?"),
-            action=state["action"],
+            action=reporter_output["action"],
             trust_score=f"{safe_float(evaluation_output.get('trust_score')):.2f}",
-            composite_score=f"{state.get('composite_score', 0):.2f}",
+            composite_score=f"{reporter_output.get('composite_score', 0):.2f}",
             decision_band=evaluation_output.get("decision_band", ""),
-            reason=state["reason"],
-            trend_assessment=state.get("trend_assessment", "unknown"),
+            reason=reporter_output["reason"],
+            trend_assessment=reporter_output.get("trend_assessment", "unknown"),
+            trend_factors=json.dumps(reporter_output.get("trend_factors", {}), indent=2, default=str),
             holdout_metrics=holdout_str,
+            forecast_diagnostics=json.dumps(
+                forecasting_output.get("forecast_diagnostics", {}),
+                indent=2,
+                default=str,
+            ),
             forecast_table=forecast_table,
             risk_breakdown=json.dumps(
                 {k: round(float(v), 2) for k, v in evaluation_output.get("risk_breakdown", {}).items()},
                 indent=2,
             ),
             news_context=evaluation_output.get("news_context", {}).get("summary", "N/A"),
-            improvement_info=improvement_info,
+            improvement_info=_summarize_improvement_info(improvement),
         )
         response = llm.invoke(prompt)
-        state["llm_markdown"] = getattr(response, "content", str(response)).strip()
+        return getattr(response, "content", str(response)).strip()
     except Exception as e:
-        state["llm_markdown"] = ""  # trigger fallback in format_report_node
         state["insight_summary"] = f"LLM markdown generation failed: {e}"
-        return state
+        return ""
 
-    state["insight_summary"] = ""  # no longer needed; full report from LLM
-    return state
+
+def _summarize_improvement_info(improvement: dict[str, Any]) -> str:
+    if improvement.get("is_retrain"):
+        old_training_score = improvement.get("old_training_score")
+        new_training_score = improvement.get("new_training_score")
+        score_text = ""
+        if old_training_score is not None and new_training_score is not None:
+            score_text = (
+                f" New training score {safe_float(new_training_score):.4f} vs old "
+                f"{safe_float(old_training_score):.4f}."
+            )
+        elif improvement.get("old_composite_score") is not None and improvement.get("new_composite_score") is not None:
+            score_text = (
+                f" New composite {safe_float(improvement.get('new_composite_score')):.2f} vs old "
+                f"{safe_float(improvement.get('old_composite_score')):.2f}."
+            )
+        return (
+            f"Retrain attempted. Promoted: {improvement.get('promoted')}. "
+            f"Reason: {improvement.get('reason', '')}. "
+            f"New model version: {improvement.get('new_model_version')}."
+            f"{score_text}"
+        )
+    if improvement.get("skip_retrain") is True or (improvement and not improvement.get("is_retrain")):
+        return improvement.get("reason", "No retrain performed.")
+    return "No retrain performed."
 
 
 def _build_forecast_table(predictions: list[dict[str, Any]]) -> str:
@@ -712,52 +987,6 @@ def _build_forecast_table(predictions: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def format_report_node(state: ReporterAgentState) -> ReporterAgentState:
-    ticker = state.get("ticker") or state["forecasting_output"]["ticker"]
-    run_date = state.get("run_date") or date.today().isoformat()
-    cfg = state.get("agent_config") or config_manager.agent
-    reporter_cfg = cfg.get("reporter", {})
-    report_dir = Path(reporter_cfg.get("reports_dir", "artifacts/reports"))
-    report_dir.mkdir(parents=True, exist_ok=True)
-
-    # Always use a single canonical filename — no _retrain suffix.
-    # The final report (after retrain if any) overwrites the initial one.
-    json_path = report_dir / f"{run_date}_{ticker}_report.json"
-    md_path   = report_dir / f"{run_date}_{ticker}_report.md"
-
-    reporter_output = {
-        "action": state["action"],
-        "reason": state["reason"],
-        "insight_summary": state.get("insight_summary", ""),
-        "trend_assessment": state["trend_assessment"],
-        "is_retrain": bool(state.get("is_retrain", False)),
-        "report_paths": {"json": str(json_path), "markdown": str(md_path)},
-        "composite_score": state["composite_score"],
-    }
-    payload = {
-        "ticker": ticker,
-        "run_id": state.get("run_id"),
-        "run_date": run_date,
-        "forecasting": state["forecasting_output"],
-        "evaluation": state["evaluation_output"],
-        "reporter": reporter_output,
-        "improvement": state.get("improvement_output"),
-    }
-    write_json_report(json_path, payload)
-
-    # Use LLM-generated markdown when available; fall back to rule-based writer
-    llm_markdown = state.get("llm_markdown", "")
-    if llm_markdown:
-        with open(md_path, "w") as f:
-            f.write(llm_markdown.rstrip() + "\n")
-    else:
-        write_markdown_report(md_path, payload)
-
-    state["reporter_output"] = reporter_output
-    state["report_paths"] = reporter_output["report_paths"]
-    return state
-
-
 def load_previous_reports(report_dir: str | Path, ticker: str, limit: int = 7) -> list[dict[str, Any]]:
     report_dir = Path(report_dir)
     if not report_dir.exists():
@@ -772,6 +1001,57 @@ def load_previous_reports(report_dir: str | Path, ticker: str, limit: int = 7) -
             continue
     reports.sort(key=lambda item: item.get("run_date") or item.get("forecasting", {}).get("generated_at", ""))
     return reports[-limit:]
+
+
+def _load_previous_markdown_reports(report_dir: str | Path, ticker: str, limit: int = 7) -> list[dict[str, str]]:
+    report_dir = Path(report_dir)
+    if not report_dir.exists():
+        return []
+    reports: list[dict[str, str]] = []
+    for path in report_dir.glob(f"*_{ticker}*_report.md"):
+        try:
+            reports.append({
+                "filename": path.name,
+                "content": path.read_text(encoding="utf-8")[:8000],
+            })
+        except OSError:
+            continue
+    reports.sort(key=lambda item: item["filename"])
+    return reports[-limit:]
+
+
+def _rule_based_retrain_effectiveness(previous_reports: list[dict[str, Any]]) -> str:
+    retrain_reports = [
+        report for report in previous_reports
+        if report.get("improvement") or report.get("reporter", {}).get("is_retrain")
+    ]
+    if not retrain_reports:
+        return "no_retrain_history"
+    improved = 0
+    worsened = 0
+    for report in retrain_reports:
+        improvement = report.get("improvement") or {}
+        old_score = improvement.get("old_training_score", improvement.get("old_composite_score"))
+        new_score = improvement.get("new_training_score", improvement.get("new_composite_score"))
+        if old_score is None or new_score is None:
+            continue
+        if "old_training_score" in improvement or "new_training_score" in improvement:
+            is_improved = safe_float(new_score) < safe_float(old_score)
+            is_worsened = safe_float(new_score) > safe_float(old_score)
+        else:
+            is_improved = safe_float(new_score) > safe_float(old_score)
+            is_worsened = safe_float(new_score) < safe_float(old_score)
+        if is_improved:
+            improved += 1
+        elif is_worsened:
+            worsened += 1
+    if improved and not worsened:
+        return "improved"
+    if worsened and not improved:
+        return "worsened"
+    if improved or worsened:
+        return "mixed"
+    return "no_retrain_history"
 
 
 def assess_history_trend(
@@ -809,14 +1089,22 @@ DEFAULT_CANDIDATES = [
 ]
 
 
-def diagnose_failure_node(state: ImprovementAgentState) -> ImprovementAgentState:
-    """Diagnose the primary cause of model failure before generating retrain candidates.
+def plan_candidates_node(state: ImprovementAgentState) -> ImprovementAgentState:
+    """Diagnose failure and generate retrain candidate configs."""
+    diagnosis, skip_retrain, skip_reason = _diagnose_improvement_need(state)
+    state["diagnosis"] = diagnosis
+    state["skip_retrain"] = skip_retrain
+    state["skip_reason"] = skip_reason
 
-    This prevents wasting retrains on market-driven volatility spikes that
-    hyperparameter tuning cannot fix. When market volatility is the root cause
-    (not model inaccuracy), we set skip_retrain=True so the improvement agent
-    returns without training — the old model stays.
-    """
+    if skip_retrain:
+        state["candidates"] = []
+        return state
+
+    state["candidates"] = _generate_improvement_candidates(state)
+    return state
+
+
+def _diagnose_improvement_need(state: ImprovementAgentState) -> tuple[dict[str, Any], bool, str | None]:
     risk = state.get("evaluation_output", {}).get("risk_breakdown", {})
     primary_cause = max(risk.items(), key=lambda x: x[1])[0] if risk else "unknown"
 
@@ -836,25 +1124,16 @@ def diagnose_failure_node(state: ImprovementAgentState) -> ImprovementAgentState
     # Market volatility alone (without accuracy degradation) is not a model problem.
     # Retraining cannot fix an unpredictable market regime — skip to avoid noise.
     if is_market_volatile and not is_accuracy_poor and not is_interval_wide:
-        state["skip_retrain"] = True
-        state["skip_reason"] = (
+        return (
+            diagnosis,
+            True,
             f"Primary cause is market volatility (recent_volatility_risk={risk.get('recent_volatility_risk', 0):.1f}), "
             "not model degradation. Retraining skipped."
         )
-    else:
-        state["skip_retrain"] = False
-        state["skip_reason"] = None
-
-    state["diagnosis"] = diagnosis
-    return state
+    return diagnosis, False, None
 
 
-def generate_candidates_node(state: ImprovementAgentState) -> ImprovementAgentState:
-    # If diagnosis determined retrain is unnecessary, emit an empty improvement result
-    if state.get("skip_retrain", False):
-        state["candidates"] = []
-        return state
-
+def _generate_improvement_candidates(state: ImprovementAgentState) -> list[dict[str, Any]]:
     ticker = state["ticker"]
     model_config = state.get("model_config") or config_manager.model
     agent_config = state.get("agent_config") or config_manager.agent
@@ -867,8 +1146,6 @@ def generate_candidates_node(state: ImprovementAgentState) -> ImprovementAgentSt
         metrics = state.get("forecasting_output", {}).get("holdout_metrics", {})
         news_summary = news_context.get("summary", "") if news_context else ""
         risk_breakdown = state.get("evaluation_output", {}).get("risk_breakdown", {})
-        diagnosis = state.get("diagnosis", {})
-
         prompt = prompt_factory.get_prompt(
             "improvement_agent",
             ticker=ticker,
@@ -893,24 +1170,22 @@ def generate_candidates_node(state: ImprovementAgentState) -> ImprovementAgentSt
     if not candidates:
         candidates = agent_config.get("improvement", {}).get("candidates", DEFAULT_CANDIDATES)
 
-    state["candidates"] = candidates
-    return state
+    return candidates
 
 
-def evaluate_candidates_node(state: ImprovementAgentState) -> ImprovementAgentState:
-    """Train all candidates to temporary directories.
+def retrain_candidates_node(state: ImprovementAgentState) -> ImprovementAgentState:
+    """Train all candidates to temporary directories and score training holdout metrics.
 
     We intentionally do NOT commit candidates to permanent version directories
     here. Each candidate is trained into an isolated tmp_* folder inside
-    artifacts_dir. select_best_candidate_node then renames the winner to the
-    next official ver_N and deletes the losers.
+    artifacts_dir. select_best_candidate_node keeps only the best temporary
+    candidate so the workflow can forecast and evaluate it before promotion.
     """
-    # Short-circuit: diagnose_failure_node may have decided retrain is not warranted
+    # Short-circuit: plan_candidates_node may have decided retrain is not warranted
     if state.get("skip_retrain", False):
         state["candidate_results"] = []
         return state
 
-    import shutil
     from src.forecasting.trainer import (
         train_quantile_models, save_quantile_models, compute_metrics,
         _select_point_quantile,
@@ -921,8 +1196,6 @@ def evaluate_candidates_node(state: ImprovementAgentState) -> ImprovementAgentSt
     df_raw = state["df_raw"]
     preprocessing_config = state.get("preprocessing_config") or config_manager.preprocessing
     model_config = state.get("model_config") or config_manager.model
-    agent_config = state.get("agent_config") or config_manager.agent
-    news_context = state.get("evaluation_output", {}).get("news_context")
     candidates = state["candidates"]
 
     artifacts_dir = Path(model_config.get("artifacts_dir", "artifacts/models"))
@@ -968,44 +1241,11 @@ def evaluate_candidates_node(state: ImprovementAgentState) -> ImprovementAgentSt
             open(tmp_dir / "metadata.json", "w"), indent=2,
         )
 
-        # Run full forecast + evaluation on this candidate
-        fc_state = {
-            "ticker": ticker,
-            "df_raw": df_raw,
-            "model_path": str(tmp_dir),
-            "horizon": state.get("horizon", 7),
-            "preprocessing_config": preprocessing_config,
-            "model_config": candidate_model_cfg,
-        }
-        fc_state = load_model_node(fc_state)
-        fc_state = predict_node(fc_state)
-        fc_state = evaluate_holdout_node(fc_state)
-        forecasting_output = fc_state["forecasting_output"]
-
-        ev_state = {
-            "ticker": ticker,
-            "forecasting_output": forecasting_output,
-            "df_recent": df_raw.tail(30),
-            "agent_config": agent_config,
-            "news_context": news_context,
-            "llm": state.get("llm"),
-        }
-        ev_state = gather_news_node(ev_state)
-        ev_state = calculate_technical_risk_node(ev_state)
-        ev_state = compute_trust_score_node(ev_state)
-        evaluation_output = ev_state["evaluation_output"]
-
-        score = composite_score(
-            evaluation_output.get("trust_score", 0.0),
-            evaluation_output.get("risk_breakdown", {}),
-        )
         candidate_results.append({
             "tmp_dir": str(tmp_dir),
-            "metrics": forecasting_output["holdout_metrics"],
+            "metrics": test_metrics,
             "training_metrics": test_metrics,
-            "forecasting_output": forecasting_output,
-            "evaluation_output": evaluation_output,
-            "composite_score": score,
+            "training_score": _candidate_metric_score(test_metrics),
             "params": candidate,
             "models": models,
             "feature_columns": preprocessing_result["feature_columns"],
@@ -1016,14 +1256,8 @@ def evaluate_candidates_node(state: ImprovementAgentState) -> ImprovementAgentSt
 
 
 def select_best_candidate_node(state: ImprovementAgentState) -> ImprovementAgentState:
-    """Pick the winner, commit it as an official ver_N, delete all losers.
-
-    This is the ONLY place where a permanent model directory is created.
-    All tmp_* directories are removed after this node regardless of outcome.
-    """
+    """Pick the best temporary candidate and delete the losers."""
     import shutil
-    from src.forecasting.trainer import get_next_model_version, save_quantile_models
-    from datetime import datetime
 
     # Short-circuit: if retrain was skipped due to diagnosis, emit a skip outcome
     if state.get("skip_retrain", False):
@@ -1036,11 +1270,10 @@ def select_best_candidate_node(state: ImprovementAgentState) -> ImprovementAgent
         return state
 
     old_model_version = state.get("model_version")
-    old_model_path = state.get("model_path")
     old_reporter = state["reporter_output"]
     old_composite = float(old_reporter.get("composite_score", 0.0))
-    model_config = state.get("model_config") or config_manager.model
-    artifacts_dir = Path(model_config.get("artifacts_dir", "artifacts/models"))
+    old_metrics = state.get("forecasting_output", {}).get("holdout_metrics", {})
+    old_training_score = _candidate_metric_score(old_metrics)
     candidate_results = state["candidate_results"]
 
     if not candidate_results:
@@ -1052,53 +1285,14 @@ def select_best_candidate_node(state: ImprovementAgentState) -> ImprovementAgent
         }
         return state
 
-    # Find the best candidate among all trained
-    best = max(candidate_results, key=lambda c: c["composite_score"])
-    losers = [c for c in candidate_results if c is not best]
+    # Find the best candidate by training holdout metrics only. Promotion is
+    # intentionally left to evaluation_workflow_node after a full rerun.
+    best = min(candidate_results, key=lambda c: c["training_score"])
 
-    promoted = best["composite_score"] > old_composite
-
-    if promoted:
-        # Rename winner's tmp dir → official ver_N
-        next_version = get_next_model_version(artifacts_dir)
-        version_dir = artifacts_dir / f"ver_{next_version}"
-        shutil.move(str(best["tmp_dir"]), str(version_dir))
-
-        # Write proper metadata
-        import json as _json
-        metadata = {
-            "version": next_version,
-            "ticker": state["ticker"],
-            "trained_at": datetime.now().isoformat(),
-            "status": "promoted",
-            "test_metrics": best["training_metrics"],
-            "xgb_params": best["params"],
-            "feature_columns": best.get("feature_columns", []),
-            "old_model_version": old_model_version,
-            "old_composite_score": old_composite,
-            "new_composite_score": best["composite_score"],
-            "promotion_reason": (
-                f"composite {best['composite_score']:.2f} beat old {old_composite:.2f}"
-            ),
-        }
-        _json.dump(metadata, open(version_dir / "metadata.json", "w"), indent=2, default=str)
-
-        reason = (
-            f"Promoted retrained version {next_version} because composite "
-            f"{best['composite_score']:.2f} beat old {old_composite:.2f}."
-        )
-        best["version"] = next_version
-        best["version_dir"] = str(version_dir)
-    else:
-        reason = (
-            f"Best candidate composite {best['composite_score']:.2f} did not "
-            f"beat old {old_composite:.2f}. No new model saved."
-        )
-        best["version"] = None
-        best["version_dir"] = None
-
-    # Delete ALL tmp dirs (winners already moved or not promoted)
+    # Delete losing tmp dirs; keep the winner for the workflow rerun.
     for candidate in candidate_results:
+        if candidate is best:
+            continue
         tmp = Path(candidate["tmp_dir"])
         if tmp.exists():
             shutil.rmtree(tmp, ignore_errors=True)
@@ -1107,12 +1301,19 @@ def select_best_candidate_node(state: ImprovementAgentState) -> ImprovementAgent
     state["improvement_output"] = {
         "is_retrain": True,
         "old_model_version": old_model_version,
-        "new_model_version": best["version"],
-        "new_model_path": best["version_dir"],
-        "promoted": promoted,
-        "reason": reason,
+        "candidate_model_path": best["tmp_dir"],
+        "candidate_params": best["params"],
+        "promoted": None,
+        "promotion_decided": False,
+        "reason": (
+            f"Selected retrained candidate with training score {best['training_score']:.4f}; "
+            "promotion will be decided after forecasting and evaluation."
+        ),
         "old_composite_score": old_composite,
-        "new_composite_score": best["composite_score"],
+        "old_training_score": old_training_score,
+        "new_training_score": best["training_score"],
+        "old_training_metrics": old_metrics,
+        "new_training_metrics": best["training_metrics"],
         "retrained_metrics": best["metrics"],
         "diagnosis": state.get("diagnosis"),
     }
@@ -1127,17 +1328,10 @@ def _merge_candidate_model_config(model_config: dict[str, Any], candidate: dict[
     return merged
 
 
-def _update_model_metadata(version_dir: Path, **updates: Any) -> None:
-    metadata_path = version_dir / "metadata.json"
-    metadata: dict[str, Any] = {}
-    if metadata_path.exists():
-        try:
-            with open(metadata_path) as f:
-                metadata = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            metadata = {}
-    metadata.setdefault("version_dir", str(version_dir))
-    metadata.update(updates)
-    metadata["promotion_checked_at"] = datetime.now(timezone.utc).isoformat()
-    with open(metadata_path, "w") as f:
-        json.dump(metadata, f, indent=2, default=str)
+def _candidate_metric_score(metrics: dict[str, Any]) -> float:
+    """Lower-is-better score for comparing retrained candidates during training."""
+    mape = safe_float(metrics.get("MAPE"), default=1.0)
+    rmse = safe_float(metrics.get("RMSE"), default=0.0)
+    mae = safe_float(metrics.get("MAE"), default=0.0)
+    # MAPE is the primary scale-free metric. RMSE/MAE are tiny tie-breakers.
+    return mape + (1e-6 * rmse) + (1e-7 * mae)

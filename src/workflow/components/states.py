@@ -12,15 +12,21 @@ class ForecastingWorkflowState(TypedDict, total=False):
     horizon: int
     fetch_latest: bool
     is_retrain: bool
-    retrain_count: int              # number of retrain cycles this run
+    retrain_count: int
     raw_data: Any
-    preprocessed_data: dict[str, Any]
     model_path: str
     model_version: int
+    original_model_path: str
+    original_model_version: int
     forecasting_output: dict[str, Any] | None
     evaluation_output: dict[str, Any] | None
     reporter_output: dict[str, Any] | None
+    original_forecasting_output: dict[str, Any] | None
+    original_evaluation_output: dict[str, Any] | None
+    original_reporter_output: dict[str, Any] | None
     improvement_output: dict[str, Any] | None
+    forced_action: str | None
+    forced_reason: str | None
     previous_reports: list[dict[str, Any]]
-    _cached_news_context: dict[str, Any] | None  # cached to avoid re-fetching on retrain
+    _cached_news_context: dict[str, Any] | None
     errors: list[dict[str, Any]]

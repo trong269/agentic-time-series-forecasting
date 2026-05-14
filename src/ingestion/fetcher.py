@@ -1,7 +1,7 @@
 """yfinance data fetcher with retry logic."""
 
 import time
-from datetime import date, timedelta
+from datetime import date
 from typing import Any
 
 import yfinance as yf

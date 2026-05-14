@@ -18,8 +18,6 @@ from .components.nodes import (
     forecasting_workflow_node,
     improvement_workflow_node,
     load_inputs_node,
-    promote_retrained_model_node,
-    reject_retrained_model_node,
     reporting_workflow_node,
     resolve_latest_usable_model,
     should_retrain,
@@ -67,6 +65,7 @@ class DailyForecastingWorkflow(BaseWorkflow):
                 forecasting_agent=self.forecasting_agent,
                 preprocessing_config=self.preprocessing_config,
                 model_config=self.model_config,
+                agent_config=self.agent_config,
             ),
         )
         graph.add_node(
@@ -95,15 +94,6 @@ class DailyForecastingWorkflow(BaseWorkflow):
                 agent_config=self.agent_config,
             ),
         )
-        graph.add_node("promote_retrained_model", promote_retrained_model_node)
-        graph.add_node(
-            "reject_retrained_model",
-            partial(
-                reject_retrained_model_node,
-                reporter_agent=self.reporter_agent,
-                agent_config=self.agent_config,
-            ),
-        )
 
         graph.add_edge(START, "load_inputs")
         graph.add_edge("load_inputs", "forecasting")
@@ -117,10 +107,8 @@ class DailyForecastingWorkflow(BaseWorkflow):
         graph.add_conditional_edges(
             "improvement",
             should_rerun_after_improvement,
-            {"rerun": "promote_retrained_model", "end": "reject_retrained_model"},
+            {"rerun": "forecasting", "end": "reporting"},
         )
-        graph.add_edge("promote_retrained_model", "forecasting")
-        graph.add_edge("reject_retrained_model", END)
         return graph
 
     def run(self, ticker: str, horizon: int = 7, fetch_latest: bool = False) -> ForecastingWorkflowState:

@@ -10,7 +10,6 @@ from .base import BaseAgent
 from .components.nodes import (
     build_news_context,
     calculate_risk_breakdown,
-    compute_live_accuracy_node,
     gather_news_node,
     calculate_technical_risk_node,
     compute_trust_score_node,
@@ -31,13 +30,11 @@ class EvaluatorAgent(BaseAgent):
 
     def build_graph(self) -> StateGraph:
         graph = StateGraph(EvaluatorAgentState)
-        graph.add_node("compute_live_accuracy", compute_live_accuracy_node)
         graph.add_node("gather_news", gather_news_node)
         graph.add_node("calculate_technical_risk", calculate_technical_risk_node)
         graph.add_node("compute_trust_score", compute_trust_score_node)
 
-        graph.add_edge(START, "compute_live_accuracy")
-        graph.add_edge("compute_live_accuracy", "gather_news")
+        graph.add_edge(START, "gather_news")
         graph.add_edge("gather_news", "calculate_technical_risk")
         graph.add_edge("calculate_technical_risk", "compute_trust_score")
         graph.add_edge("compute_trust_score", END)

@@ -1,4 +1,4 @@
-from typing import Dict, Any, List
+from typing import Any
 
 from .evaluator_agent import EvaluatorAgent
 from .forecasting_agent import ForecastingAgent
@@ -12,8 +12,8 @@ logger = get_logger(__name__)
 
 class AgentFactory:
 
-    _agents: Dict[str, Any] = {}
-    _builders: Dict[str, str] = {
+    _agents: dict[str, Any] = {}
+    _builders: dict[str, str] = {
         "forecasting_agent": "_build_forecasting_agent",
         "evaluator_agent": "_build_evaluator_agent",
         "reporter_agent": "_build_reporter_agent",
@@ -104,7 +104,7 @@ class AgentFactory:
         return cls._agents[agent_name]
 
     @classmethod
-    def list_agents(cls) -> Dict[str, str]:
+    def list_agents(cls) -> dict[str, str]:
         """List all available pre-built agents"""
         return {
             agent_name: agent.__class__.__name__

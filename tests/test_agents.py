@@ -1,6 +1,8 @@
 import tempfile
 import unittest
+import json
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -15,6 +17,8 @@ from src.utils.scoring import composite_score
 from src.forecasting.predictor import load_models
 from src.workflow import DailyForecastingWorkflow
 from src.workflow.base import BaseWorkflow
+from src.workflow.components.nodes import _finalize_retrain_candidate
+from src.utils.langfuse import build_langfuse_runnable_config
 
 
 def _forecasting_output():
@@ -97,8 +101,12 @@ class AgentTests(unittest.TestCase):
             output = result["reporter_output"]
 
             self.assertEqual(output["action"], "retrain")
+            self.assertTrue(output["insight_summary"])
             self.assertTrue(Path(output["report_paths"]["json"]).exists())
             self.assertTrue(Path(output["report_paths"]["markdown"]).exists())
+            with open(output["report_paths"]["json"]) as f:
+                report_payload = json.load(f)
+            self.assertTrue(report_payload["reporter"]["insight_summary"])
 
     def test_history_trend_detects_degradation(self):
         previous = [{"reporter": {"composite_score": score}} for score in [80, 82, 78]]
@@ -130,6 +138,85 @@ class AgentTests(unittest.TestCase):
         self.assertIn("evaluation", graph.nodes)
         self.assertIn("reporting", graph.nodes)
         self.assertIn("improvement", graph.nodes)
+        self.assertNotIn("promote_retrained_model", graph.nodes)
+        self.assertNotIn("mark_retrain_rejected", graph.nodes)
+        self.assertNotIn("reject_retrained_model", graph.nodes)
+
+        forecasting_graph = workflow.forecasting_agent.build_graph()
+        self.assertIn("load_model", forecasting_graph.nodes)
+        self.assertIn("predict", forecasting_graph.nodes)
+        self.assertNotIn("evaluate_holdout", forecasting_graph.nodes)
+
+        evaluator_graph = workflow.evaluator_agent.build_graph()
+        self.assertIn("gather_news", evaluator_graph.nodes)
+        self.assertIn("calculate_technical_risk", evaluator_graph.nodes)
+        self.assertIn("compute_trust_score", evaluator_graph.nodes)
+        self.assertNotIn("compute_live_accuracy", evaluator_graph.nodes)
+
+        reporter_graph = workflow.reporter_agent.build_graph()
+        self.assertIn("decide_action", reporter_graph.nodes)
+        self.assertIn("generate_report", reporter_graph.nodes)
+        self.assertNotIn("assess_trend", reporter_graph.nodes)
+        self.assertNotIn("determine_action", reporter_graph.nodes)
+        self.assertNotIn("generate_markdown_report", reporter_graph.nodes)
+        self.assertNotIn("format_report", reporter_graph.nodes)
+
+        improvement_graph = workflow.improvement_agent.build_graph()
+        self.assertIn("plan_candidates", improvement_graph.nodes)
+        self.assertIn("retrain_candidates", improvement_graph.nodes)
+        self.assertIn("select_best", improvement_graph.nodes)
+        self.assertNotIn("diagnose_failure", improvement_graph.nodes)
+        self.assertNotIn("generate_candidates", improvement_graph.nodes)
+        self.assertNotIn("evaluate_candidates", improvement_graph.nodes)
+
+    def test_langfuse_config_preserves_base_config_when_disabled(self):
+        base_config = {
+            "callbacks": ["existing-callback"],
+            "metadata": {"request_id": "test"},
+            "tags": ["unit"],
+        }
+
+        with patch("src.utils.langfuse.is_langfuse_enabled", return_value=False):
+            result = build_langfuse_runnable_config(
+                workflow_name="daily_forecasting_workflow",
+                input_data={"ticker": "NVDA", "run_id": "run-1"},
+                base_config=base_config,
+            )
+
+        self.assertEqual(result, base_config)
+
+    def test_evaluation_finalizes_retrain_promotion(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            candidate_dir = Path(tmpdir) / "tmp_0"
+            candidate_dir.mkdir()
+            (candidate_dir / "metadata.json").write_text(json.dumps({"tmp": True}))
+
+            state = {
+                "ticker": "NVDA",
+                "is_retrain": True,
+                "model_path": str(candidate_dir),
+                "original_model_path": "artifacts/models/ver_1",
+                "original_model_version": 1,
+                "forecasting_output": {"model_path": str(candidate_dir), "model_version": None},
+                "evaluation_output": {
+                    "trust_score": 85.0,
+                    "decision_band": "accept",
+                    "risk_breakdown": {},
+                },
+                "improvement_output": {
+                    "candidate_model_path": str(candidate_dir),
+                    "promotion_decided": False,
+                    "old_composite_score": 50.0,
+                },
+            }
+
+            _finalize_retrain_candidate(state)
+
+            self.assertTrue(state["improvement_output"]["promoted"])
+            self.assertEqual(state["model_version"], 1)
+            self.assertEqual(Path(state["model_path"]).name, "ver_1")
+            self.assertFalse(candidate_dir.exists())
+            self.assertEqual(state["forecasting_output"]["model_path"], state["model_path"])
 
 
 if __name__ == "__main__":

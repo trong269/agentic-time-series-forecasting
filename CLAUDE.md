@@ -4,25 +4,48 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## System Overview
 
-An end-to-end automated pipeline for time series forecasting focused on **NVDA stock** using **yfinance** for live data ingestion. The forecasting core is now a **one-step-ahead quantile XGBoost model** that is rolled forward recursively to produce a 7-day forecast with confidence intervals.
+An end-to-end automated pipeline for time series forecasting focused on **NVDA stock** using **yfinance** for live data ingestion. The forecasting core is a **one-step-ahead quantile XGBoost model** that is rolled forward recursively to produce a 7-day forecast with confidence intervals.
+
+The current project also includes a LangGraph-based multi-agent daily workflow:
+
+1. Load local/latest stock inputs.
+2. Forecast with the latest usable model.
+3. Evaluate forecast risk with technical metrics and news context.
+4. Generate JSON/Markdown reports.
+5. Optionally retrain candidate models.
+6. Re-forecast and re-evaluate the selected retrain candidate.
+7. Promote or reject the candidate in evaluation, then write a final report.
 
 ## Architecture
 
 ```
-[Live Data Ingestion] → [Preprocessing] → [Forecasting Model] → [AI Agent Evaluator] → [Report Output]
-                                                                              ↑
-                                                                        [Improvement Agent]
+[Load Inputs]
+      ↓
+[Forecasting Agent]
+      ↓
+[Evaluator Agent]
+      ↓
+[Reporter Agent] ── action=retrain ──→ [Improvement Agent]
+      ↑                                      │
+      └──── rerun with selected tmp model ───┘
 ```
+
+Promotion contract:
+
+- `ImprovementAgent` trains candidate models and selects the best temporary candidate only.
+- `EvaluatorAgent` is the owner of final promote/reject after the selected candidate is forecast and evaluated.
+- A promoted candidate is moved from `artifacts/models/tmp_*` to `artifacts/models/ver_N/`.
+- A rejected candidate is deleted and workflow state is restored to the original model/output before final reporting.
 
 ### Directory Structure
 
 - `src/ingestion/` — Fetches daily stock data via **yfinance**. Writes to `data/`.
 - `src/preprocessing/` — Feature engineering and train/test splitting for XGBoost.
 - `src/forecasting/` — One-step quantile XGBoost training and recursive multi-day prediction.
-- `src/agents/` — Agent scaffolding. Most agent logic is still pending.
-- `src/workflow/` — LangGraph orchestration (states, nodes, edges).
-- `src/tools/` — Agent tools scaffolding.
-- `src/llm/` — LLM provider abstraction (Anthropic, OpenAI).
+- `src/agents/` — LangGraph agents for forecasting, evaluation, reporting, and improvement.
+- `src/workflow/` — Daily LangGraph orchestration (states, nodes, edges, promotion/rejection lifecycle).
+- `src/tools/` — External tool wrappers such as Tavily news search.
+- `src/llm/` — LLM provider abstraction (OpenAI/Gemini via LangChain).
 - `scripts/` — Entry points: `run_daily_pipeline.py` (full pipeline), `train_model.py` (manual retraining).
 - `configs/` — YAML configuration for data sources, model params, and agent settings.
 - `artifacts/models/` — Serialized forecast models (versioned: `ver_N/`).
@@ -44,8 +67,14 @@ python -c "from src.preprocessing import preprocess_for_training; result = prepr
 # Preprocess explicit DataFrame/config for agent use
 python -c "from src.ingestion import get_stock_data; from src.preprocessing import preprocess_data; from src.utils.config_manager import config_manager; df = get_stock_data('NVDA'); result = preprocess_data(df, config_manager.preprocessing)"
 
-# Run the full daily pipeline (ingest → forecast → evaluate → report)
+# Run the full daily workflow (forecast → evaluate → report → optional retrain/evaluate/report)
 python scripts/run_daily_pipeline.py
+
+# Run daily workflow for an explicit ticker
+python scripts/run_daily_pipeline.py NVDA
+
+# Run workflow and fetch latest yfinance data first
+python scripts/run_daily_pipeline.py NVDA --fetch-latest
 
 # Retrain forecast model manually
 python scripts/train_model.py
@@ -59,8 +88,8 @@ with open('artifacts/reports/prediction_result.json', 'w') as f:
     json.dump(result, f, indent=2)
 "
 
-# Run smoke test script
-python scripts/test_refactored.py
+# Run tests without pytest
+python -m unittest tests.test_agents -v
 
 # Install dependencies
 pip install -r requirements.txt
@@ -79,6 +108,18 @@ All settings managed via YAML configs in `configs/`. Environment variables (API 
 | `configs/preprocessing.yaml` | Feature engineering settings (lags, technical indicators) |
 | `configs/model.yaml` | XGBoost model parameters, quantiles, artifacts directory |
 | `configs/agent.yaml` | Agent settings |
+
+### Agent Workflow Config
+
+**`configs/agent.yaml`**
+
+- `llm`: provider/model credentials for LLM-backed enrichment/report text.
+- `evaluator.accept_threshold`: score threshold for accept.
+- `evaluator.retrain_threshold`: score threshold below which reporting may request retrain.
+- `evaluator.news`: Tavily search settings.
+- `reporter.reports_dir`: JSON/Markdown output directory.
+- `reporter.history_n`: number of prior reports used for trend context.
+- `improvement.candidates`: XGBoost parameter candidates trained during retrain.
 
 ### Key Configuration Keys
 
@@ -210,21 +251,52 @@ xgb_params:
 - [x] **Scripts** (`scripts/train_model.py`)
   - Standalone model retraining script
 
-**Current Model Metrics (One-Step Contract, Version 20):**
-| Metric | Value |
-|--------|-------|
-| Train samples | 393 |
-| Test samples | 60 |
-| Test MAE | ~6.35 |
-| Test RMSE | ~8.97 |
-| Test MAPE | ~3.23% |
+**Model Metrics Note:**
 
-### Pending
+Model metrics are version-specific and stored in each `artifacts/models/ver_N/metadata.json`.
+Do not hard-code a "current best" model version in docs; use `resolve_latest_usable_model()` or inspect model metadata.
 
-- [ ] Agent evaluation logic (`src/agents/`)
-- [ ] Reporting module
-- [ ] Scripts implementation (`run_daily_pipeline.py`)
-- [ ] Real test suite under `tests/` (current validation is `scripts/test_refactored.py`)
+### Phase 4: Agent Workflow ✅ IMPLEMENTED
+
+- [x] **BaseAgent / BaseWorkflow**
+  - Shared LangGraph compile/invoke pattern.
+  - Runnable config is forwarded so tracing/callbacks can flow into nested agent graphs.
+
+- [x] **ForecastingAgent**
+  - Loads explicit model version directory.
+  - Generates 7-day recursive forecast with 80%/95% intervals.
+  - Adds diagnostics such as average interval width, 7-day return, latest close, and optional live MAPE from prior reports.
+
+- [x] **EvaluatorAgent**
+  - Gathers Tavily news context when available.
+  - Computes normalized technical/news risk breakdown.
+  - Produces `trust_score`, `decision_band`, and structured `evaluation_output`.
+  - Reuses cached news context during post-retrain evaluation to avoid repeated Tavily calls.
+
+- [x] **ReporterAgent**
+  - Computes composite score and trend factors from prior reports.
+  - Decides `accept`, `retrain`, `accept_after_retrain`, or forced workflow actions.
+  - Writes canonical daily JSON and Markdown reports to `artifacts/reports/YYYY-MM-DD_TICKER_report.*`.
+
+- [x] **ImprovementAgent**
+  - Diagnoses whether retrain is warranted.
+  - Trains configured XGBoost candidates into temporary `artifacts/models/tmp_*` directories.
+  - Selects the best temporary candidate by training holdout score.
+  - Does **not** promote. Promotion is deliberately deferred to workflow evaluation after candidate rerun.
+
+- [x] **DailyForecastingWorkflow**
+  - Graph: `load_inputs -> forecasting -> evaluation -> reporting -> optional improvement -> forecasting -> evaluation -> reporting`.
+  - Retrain budget is capped at one cycle per run.
+  - Candidate promotion/rejection happens after post-retrain evaluation.
+  - Reject path deletes the temporary candidate, restores the original model/output, and final report uses `reject_retrained_keep_old`.
+
+### Current Known Issues / Follow-Ups
+
+- Tavily/network failures currently fail evaluator unless the caller injects/offlines news context; production workflow should degrade to `news_unavailable` instead of crashing.
+- Temporary retrain directories are named `tmp_0`, `tmp_1`, `tmp_2`; make them run-scoped to avoid stale artifact collisions after crashes.
+- Skip-retrain due to external market/news conditions should use a distinct action such as `skip_retrain_keep_old` rather than `reject_retrained_keep_old`.
+- Promotion threshold is currently `decision_band != "retrain"` and `new_composite_score > old_composite_score`; consider a configurable minimum delta and/or requiring `accept`.
+- `pytest` may be absent in some local conda envs; `python -m unittest tests.test_agents -v` is the current reliable test command.
 
 ### Agent-Ready Functions
 
@@ -257,8 +329,26 @@ Convenience wrappers that still touch project config / DB / artifacts:
 1. **Ingestion** pulls stock data via yfinance and stores in SQLite (`data/stocks.db`)
 2. **Preprocessing** creates 14 features: price lags, returns, MAs, technical indicators, calendar
 3. **Forecasting** trains a one-step quantile model and rolls it forward recursively for 7 trading days
-4. **Agent Evaluator** reads predictions, diagnoses issues, outputs structured feedback
-5. **Improvement Agent** receives feedback and adjusts model parameters or triggers retraining
+4. **Evaluator Agent** reads predictions and news context, then outputs trust/risk decisions
+5. **Reporter Agent** writes structured JSON/Markdown and may request retrain
+6. **Improvement Agent** trains candidate models only when requested
+7. **Post-retrain Evaluation** decides whether to promote the selected candidate or keep the original model
+8. **Final Reporting** writes the final accept/reject outcome
+
+## Retrain / Promotion Flow
+
+When `ReporterAgent` returns `action == "retrain"` and the retrain budget is available:
+
+1. `ImprovementAgent` trains configured candidate parameter sets into temporary model directories.
+2. `ImprovementAgent` selects the best temporary candidate by training holdout score.
+3. Workflow stores the original model path/version and original forecast/evaluation/report outputs.
+4. Workflow reruns `ForecastingAgent` using the selected temporary model.
+5. Workflow reruns `EvaluatorAgent` on the candidate forecast.
+6. `evaluation_workflow_node` finalizes promotion:
+   - Promote when candidate decision band is not `retrain` and candidate composite score beats the original composite score.
+   - Reject otherwise.
+7. Promote path moves the temporary model to `ver_N` and updates metadata.
+8. Reject path deletes the temporary model and restores original state for final reporting.
 
 ---
 

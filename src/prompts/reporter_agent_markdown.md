@@ -15,11 +15,17 @@ You are an expert financial analyst and technical writer. Write a professional d
 ### Holdout Metrics (last 60 days backtest)
 $holdout_metrics
 
+### Forecast Diagnostics
+$forecast_diagnostics
+
 ### 7-Day Forecast Table
 $forecast_table
 
 ### Risk Breakdown (0–100, higher = more risky)
 $risk_breakdown
+
+### Historical Trend Evidence
+$trend_factors
 
 ### News Context
 $news_context
@@ -34,16 +40,20 @@ $improvement_info
 Write a complete, well-structured Markdown report. The report must:
 
 1. **Start with a clear title and executive summary** (2–3 sentences stating the action taken and why).
-2. **Include a "Model Performance" section** interpreting the holdout metrics and what they mean for forecast reliability.
-3. **Include a "7-Day Forecast" section** with the forecast table (reproduce it exactly as given), followed by 1–2 sentences on the forecast trend and direction.
-4. **Include a "Risk Assessment" section** explaining each risk dimension in plain English. Call out the 2–3 highest risks specifically.
-5. **Include a "Market Context" section** summarizing relevant news sentiment and its impact on the decision.
-6. **If improvement/retrain occurred**, include a "Retrain Summary" section explaining what happened and the outcome.
-7. **End with a "Recommendation" section** — 2–3 actionable bullet points for the investment team.
+2. **Include a "Decision" section** with Action, Trust Score, Composite Score, Decision Band, and the specific reason.
+3. **Include a "Model Performance" section** interpreting holdout metrics, live MAPE if present in diagnostics, and what the metrics mean for forecast reliability.
+4. **Include a "7-Day Forecast" section** with the forecast table (reproduce it exactly as given), followed by 1–2 sentences on forecast trend and direction.
+5. **Include a "Risk Assessment" section** explaining each risk dimension in plain English. Call out the 2–3 highest risks specifically.
+6. **Include a "Historical Trend Evidence" section** using the extracted trend evidence. Explain whether risks look persistent, model-driven, market-driven, or news-driven.
+7. **Include a "Market Context" section** summarizing relevant news sentiment and its impact on the decision.
+8. **If improvement/retrain occurred**, include a "Retrain Summary" section explaining what happened and the outcome.
+9. **End with a "Recommendation" section** — 2–3 actionable bullet points for the investment team.
 
 ## Style Rules
 - Use plain, professional language. No jargon without explanation.
 - Bold key numbers.
 - Keep sections concise — no fluff.
+- Do not invent facts beyond the provided data. If a field is missing, say it is unavailable.
+- Do not recommend buying or selling; frame recommendations as monitoring, validation, or model actions.
 - Do NOT add any commentary outside the report itself.
 - Output raw Markdown only (no ```markdown fence, just the content itself).
