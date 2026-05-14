@@ -7,7 +7,37 @@ name = "agentic-time-series-forecasting"
 version = "0.1.0"
 description = "End-to-end automated pipeline for NVDA stock time series forecasting"
 requires-python = ">=3.10"
+dependencies = [
+    "yfinance",
+    "numpy",
+    "pandas",
+    "python-dotenv",
+    "pyyaml",
+    "python-dateutil",
+    "xgboost",
+    "joblib",
+    "scikit-learn",
+    "langchain",
+    "langchain-core",
+    "langchain-openai",
+    "langchain-google-genai",
+    "langgraph",
+    "langfuse",
+    "tavily-python",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+[project.scripts]
+run-daily-pipeline = "scripts.run_daily_pipeline:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["src*"]
+include = ["src*", "scripts*"]
+namespaces = true
+
+[tool.setuptools.package-data]
+"src.prompts" = ["*.md"]

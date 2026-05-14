@@ -1,0 +1,93 @@
+"""Agent state definitions."""
+
+from __future__ import annotations
+
+from typing import Any, TypedDict
+
+
+class ForecastingAgentState(TypedDict, total=False):
+    ticker: str
+    df_raw: Any
+    model_path: str
+    horizon: int
+    preprocessing_config: dict[str, Any]
+    model_config: dict[str, Any]
+    agent_config: dict[str, Any]
+    
+    # Intermediate state fields
+    loaded_models: Any
+    predictions: Any
+    holdout_metrics: dict[str, float]
+    
+    # Final output
+    forecasting_output: dict[str, Any]
+
+
+class EvaluatorAgentState(TypedDict, total=False):
+    ticker: str
+    forecasting_output: dict[str, Any]
+    df_recent: Any
+    agent_config: dict[str, Any]
+    llm: Any
+
+    # Intermediate state fields
+    news_context: dict[str, Any]
+    risk_breakdown: dict[str, float]
+    trust_score: float
+    decision_band: str
+    is_black_swan: bool
+
+    # Final output
+    evaluation_output: dict[str, Any]
+
+
+class ReporterAgentState(TypedDict, total=False):
+    ticker: str
+    run_id: str
+    run_date: str
+    is_retrain: bool
+    forecasting_output: dict[str, Any]
+    evaluation_output: dict[str, Any]
+    improvement_output: dict[str, Any]
+    previous_reports: list[dict[str, Any]]
+    agent_config: dict[str, Any]
+    forced_action: str
+    forced_reason: str
+    llm: Any
+
+    # Intermediate state fields
+    trend_assessment: str
+    trend_factors: dict[str, Any]
+    action: str
+    reason: str
+    insight_summary: str
+    composite_score: float
+
+    # Final output
+    reporter_output: dict[str, Any]
+
+
+class ImprovementAgentState(TypedDict, total=False):
+    ticker: str
+    df_raw: Any
+    model_path: str
+    model_version: int
+    forecasting_output: dict[str, Any]
+    evaluation_output: dict[str, Any]
+    reporter_output: dict[str, Any]
+    horizon: int
+    preprocessing_config: dict[str, Any]
+    model_config: dict[str, Any]
+    agent_config: dict[str, Any]
+    llm: Any
+
+    # Intermediate state fields
+    diagnosis: dict[str, Any]        # root-cause analysis before retraining
+    skip_retrain: bool               # True when market volatility is the sole cause
+    skip_reason: str | None
+    candidates: list[dict[str, Any]]
+    candidate_results: list[dict[str, Any]]
+    best_candidate: dict[str, Any]
+
+    # Final output
+    improvement_output: dict[str, Any]

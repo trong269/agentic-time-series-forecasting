@@ -4,3 +4,38 @@ llm:
   api_key: ${LLM_API_KEY:}
   model: ${LLM_MODEL:gpt-4o}
   temperature: ${LLM_TEMPERATURE:0.0}
+
+evaluator:
+  accept_threshold: 70
+  retrain_threshold: 50
+  trust_score:
+    weights:
+      holdout_mape: 0.30
+      holdout_rmse_pct: 0.15
+      interval_width: 0.15
+      recent_volatility: 0.15
+      trend_alignment: 0.10
+      news_risk: 0.15
+  news:
+    provider: tavily
+    max_results: 8
+    lookback_days: 7
+    search_depth: advanced
+
+reporter:
+  reports_dir: artifacts/reports
+  history_n: 7
+  strong_degradation_threshold: 8.0
+
+improvement:
+  max_retrain_attempts: 1
+  candidates:
+    - n_estimators: 300
+      max_depth: 4
+      learning_rate: 0.03
+    - n_estimators: 250
+      max_depth: 5
+      learning_rate: 0.05
+    - n_estimators: 200
+      max_depth: 3
+      learning_rate: 0.07
